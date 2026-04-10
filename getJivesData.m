@@ -1,23 +1,26 @@
-function getJivesData()
+function outputData = getJivesData()
 % getJivesData  T1 acquisition callback for jivesBROnline.
 %
 % Flushes the cbmex comment buffer every 250 ms, parses Jives comments in
-% "Trial N: <event>" format, and accumulates completed trials into the global
-% `trials` struct array.
+% "Trial N: <event>" format. Returns a completed trial struct when a trial
+% ends, or [] if no trial completed this tick.
 %
 % Trial parsing is adapted from doc/CommentTrialStructure.m.
 % Called by jivesBROnline.m — do not call directly.
 
-global trials inTrial localData
+global inTrial
+persistent localData
 
-% Start timing for adaptive adjustment
-processStart = tic;
+outputData = [];
 
-% Trial struct template — fields needed for psychometrics.
+dbstop if error
+
+% Trial struct template — fields needed for online plots
 % Extended here rather than in the entry script to keep jivesBROnline clean.
 TEMPLATE = struct( ...
-    'trial_num',          NaN, ...
-    'task_type',          '', ...    % string: 'Fixation task', 'Visual Saccade Task', etc.
+    'Trial_number',          NaN, ...
+    'Task',        '',... % string: 'Fixation task', 'Visual Saccade Task', etc.
+    'Trial_type',          '', ...   %string： visual or memory 
     'Start',              NaN, ...   % absolute time (s)
     'End',                NaN, ...   % absolute time (s)
     'Trialoutcome',       NaN, ...   % string: 'Correct', 'Time out', etc.
@@ -25,28 +28,16 @@ TEMPLATE = struct( ...
     'Choosen_choice',     NaN, ...   % string: '1' or '2'
     'Choicetime',         NaN, ...   % absolute time of target acquisition (s)
     'Target_1_presented', NaN, ...   % absolute time targets came on (s)
+    'Target_2_presented', NaN, ...   % absolute time targets came on (s)
     'Target_1_position',  [NaN NaN], ...  % [x, y] deg
     'Target_2_position',  [NaN NaN]  ...  % [x, y] deg
 );
 
 % Flush both buffers every tick
-%cbmex('trialdata', 1);                        % keep spike buffer clear (unused here)
+%spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear 
 [cmts, ts, ~, ~] = cbmex('trialcomment', 1);  % flush comment buffer
 if isempty(cmts); return; end
 
-% Adaptive processing: limit comments per cycle to prevent timing overruns
-maxCommentsPerCycle = 50;  % Process max 50 comments per 250ms cycle
-nComments = numel(cmts);
-if nComments > maxCommentsPerCycle
-    fprintf('Warning: %d comments received, processing only first %d\n', ...
-        nComments, maxCommentsPerCycle);
-    cmts = cmts(1:maxCommentsPerCycle);
-    ts = ts(1:maxCommentsPerCycle);
-end
-
-% Sort by timestamp
-%[ts, ord] = sort(ts);
-%cmts = cmts(ord);
 
 for i = 1:numel(cmts)
     tok = regexp(cmts{i}, '^Trial\s+(\d+):\s*(.*)$', 'tokens');
@@ -56,45 +47,47 @@ for i = 1:numel(cmts)
     event_text = strtrim(tok{1}{2});
     t          = ts(i);
 
+    %First check whether the trial number changed or not
+    if exist('localData','var') && ~isempty(localData) && trl_num ~= localData.Trial_number
+        % Trial number changed — this means the previous trial ended without an "End - ..." comment
+        % Store the previous trial if it has a valid start time
+        if ~isnan(localData.Start)
+            outputData = localData;
+            fprintf('Trial %3d  outcome: %-12s  choice: %s\n', ...
+                localData.Trial_number, num2str(localData.Trialoutcome), num2str(localData.Choosen_choice));
+            disp('Incompelete trial ended without "End - ..." comment. Storing with whatever data we have.');
+        end
+        inTrial   = false;
+        localData = []; 
+        
+    end
+
     % --- Trial start ---
-    if strcmp(event_text, 'Start')
+    if contains(event_text, 'Start')
         inTrial             = true;
         localData           = TEMPLATE;
-        localData.trial_num = trl_num;
+        localData.Trial_number = trl_num;
         localData.Start     = t;
 
     elseif ~inTrial
         continue   % ignore events outside a trial
 
     % --- Task type: "Task Time discrimination task", etc. ---
-    elseif startsWith(event_text, 'Task')
-        if isempty(localData.task_type)
-            localData.task_type = strtrim(event_text(5:end));  % strip leading "Task"
+    elseif contains(event_text, 'Experiment')
+        if isempty(localData.Task)
+            localData.Task = strtrim(event_text(11:end));  % strip leading "Experiment"
+        end
+    elseif contains(event_text, 'Trial type')
+        if isempty(localData.Trial_type)
+            localData.Trial_type = strtrim(event_text(11:end));  % strip leading "Trial type"
         end
 
-    % --- Trial end: "End - Correct", "End - Time out", etc. ---
-    elseif startsWith(event_text, 'End')
-        dash = strfind(event_text, '-');
-        if ~isempty(dash)
-            localData.Trialoutcome = strtrim(event_text(dash+1:end));
-        end
-        localData.End = t;
-
-        if isempty(trials)
-            trials = localData;
-        else
-            trials(end+1) = localData; %#ok<AGROW>
-        end
-        fprintf('Trial %3d  outcome: %-12s  choice: %s\n', ...
-            trl_num, num2str(localData.Trialoutcome), num2str(localData.Choosen_choice));
-        inTrial   = false;
-        localData = [];
-
+    
     % --- Choice: "Correct choice - 1", "Wrong choice - 2" ---
     elseif contains(event_text, '-') && contains(event_text, 'choice')
         dash = strfind(event_text, '-');
         if isnan(localData.Choosen_choice)
-            localData.Choosen_choice = strtrim(event_text(dash+1:end));  % '1' or '2'
+            localData.Choosen_choice = strtrim(event_text(dash+1:end));  % 1 or 2
         end
         if isnan(localData.Choiceoutcome)
             localData.Choiceoutcome = strtrim(event_text(1:dash-1));     % 'Correct choice' etc.
@@ -107,19 +100,23 @@ for i = 1:numel(cmts)
         end
 
     % --- Choice time: target acquired ---
-    elseif strcmp(event_text, 'Target 1 acquired') || strcmp(event_text, 'Target 2 acquired')
+    elseif contains(event_text, 'Target 1 acquired') || contains(event_text, 'Target 2 acquired')
         if isnan(localData.Choicetime)
             localData.Choicetime = t;
         end
 
     % --- Targets on ---
-    elseif strcmp(event_text, 'Target 1 presented')
+    elseif contains(event_text, 'Target 1 presented')
         if isnan(localData.Target_1_presented)
             localData.Target_1_presented = t;
         end
+    elseif contains(event_text, 'Target 2 presented')
+        if isnan(localData.Target_2_presented)
+            localData.Target_2_presented = t;
+        end
 
     % --- Target positions: "Target 1 position (x, y) deg" ---
-    elseif startsWith(event_text, 'Target')
+    elseif contains(event_text, 'Target 1 position') || contains(event_text, 'Target 2 position')
         coord_tok = regexp(event_text, ...
             '^Target\s+(\d)\s+position\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)\s*deg$', ...
             'tokens');
@@ -131,40 +128,22 @@ for i = 1:numel(cmts)
                 localData.(field) = xy;
             end
         end
+
+    % --- Trial end: "End - Correct", "End - Time out", etc. ---
+    elseif contains(event_text, 'End')
+        dash = strfind(event_text, '-');
+        if ~isempty(dash)
+            localData.Trialoutcome = strtrim(event_text(dash+1:end));
+        end
+        localData.End = t;
+        outputData = localData;
+        fprintf('Trial %3d  outcome: %-12s  choice: %s\n', ...
+            trl_num, num2str(localData.Trialoutcome), num2str(localData.Choosen_choice));
+        inTrial   = false;
+        localData = [];
     end
+    
 end
 
-% Adaptive timing: adjust timer period based on processing load
-processTime = toc(processStart);
-currentTimer = timerfind('Name', 'Jives_Acquire');
-if ~isempty(currentTimer)
-    timerData = currentTimer.UserData;
-    if isempty(timerData)
-        timerData = struct('basePeriod', 0.25, 'lastProcessTime', 0, 'overloadCount', 0);
-    end
-    
-    % If processing took >80% of period, increase period or count overloads
-    period = currentTimer.Period;
-    if processTime > 0.8 * period
-        timerData.overloadCount = timerData.overloadCount + 1;
-        if timerData.overloadCount >= 3  % 3 consecutive overloads
-            newPeriod = min(period * 1.5, 1.0);  % Cap at 1 second
-            currentTimer.Period = newPeriod;
-            fprintf('Increasing T1 period to %.3f s (processing: %.3f s)\n', newPeriod, processTime);
-            timerData.overloadCount = 0;
-        end
-    elseif processTime < 0.3 * period && period > timerData.basePeriod
-        % If consistently fast, gradually reduce period
-        timerData.overloadCount = max(timerData.overloadCount - 1, 0);
-        if timerData.overloadCount == 0
-            newPeriod = max(period * 0.9, timerData.basePeriod);
-            currentTimer.Period = newPeriod;
-            fprintf('Decreasing T1 period to %.3f s (processing: %.3f s)\n', newPeriod, processTime);
-        end
-    else
-        timerData.overloadCount = 0;
-    end
-    
-    timerData.lastProcessTime = processTime;
-    currentTimer.UserData = timerData;
+
 end
