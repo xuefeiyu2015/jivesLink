@@ -3,7 +3,7 @@
 %
 % Architecture:
 %   T1 (250 ms) — getJivesData.m    reads cbmex buffers, parses Jives comments
-%   T2 (1 s)    — plotJivesPsychometrics.m    plots psychometrics from trials
+%   T2 (1 s)    — jivesAnalysisSwitchyard.m   dispatches to task-specific plot
 %
 % Usage:
 %   1. Run this script.
@@ -27,7 +27,7 @@ localData = [];
 %% Connect
 cbmex('open')
 % 'comment', 200 — comment buffer size (no default documented)
-cbmex('trialconfig', 1, 'double', 'absolute');%, 'comment', 200)
+cbmex('trialconfig', 1, 'double', 'absolute', 'comment', 50)
 
 %% Timers
 T1 = timer('Name',          'Jives_Acquire', ...
@@ -35,11 +35,13 @@ T1 = timer('Name',          'Jives_Acquire', ...
            'ExecutionMode', 'fixedRate', ...
            'TimerFcn',       @(~,~) getJivesData(), ...
            'ErrorFcn',       @(~,e) fprintf('[T1 error] %s\n', e.Data.message));
+% Store initial period for adaptive timing
+T1.UserData = struct('basePeriod', 0.25, 'lastProcessTime', 0, 'overloadCount', 0);
 
 T2 = timer('Name',          'Jives_Plot', ...
            'Period',         1.0, ...
            'ExecutionMode', 'fixedRate', ...
-           'TimerFcn',       @(~,~) plotJivesPsychometrics(nFig), ...
+           'TimerFcn',       @(~,~) jivesAnalysisSwitchyard(nFig), ...
            'ErrorFcn',       @(~,e) fprintf('[T2 error] %s\n', e.Data.message));
 
 start(T1);

@@ -10,10 +10,14 @@ function getJivesData()
 
 global trials inTrial localData
 
+% Start timing for adaptive adjustment
+processStart = tic;
+
 % Trial struct template — fields needed for psychometrics.
 % Extended here rather than in the entry script to keep jivesBROnline clean.
 TEMPLATE = struct( ...
     'trial_num',          NaN, ...
+    'task_type',          '', ...    % string: 'Fixation task', 'Visual Saccade Task', etc.
     'Start',              NaN, ...   % absolute time (s)
     'End',                NaN, ...   % absolute time (s)
     'Trialoutcome',       NaN, ...   % string: 'Correct', 'Time out', etc.
@@ -26,13 +30,23 @@ TEMPLATE = struct( ...
 );
 
 % Flush both buffers every tick
-cbmex('trialdata', 1);                        % keep spike buffer clear (unused here)
+%cbmex('trialdata', 1);                        % keep spike buffer clear (unused here)
 [cmts, ts, ~, ~] = cbmex('trialcomment', 1);  % flush comment buffer
 if isempty(cmts); return; end
 
+% Adaptive processing: limit comments per cycle to prevent timing overruns
+maxCommentsPerCycle = 50;  % Process max 50 comments per 250ms cycle
+nComments = numel(cmts);
+if nComments > maxCommentsPerCycle
+    fprintf('Warning: %d comments received, processing only first %d\n', ...
+        nComments, maxCommentsPerCycle);
+    cmts = cmts(1:maxCommentsPerCycle);
+    ts = ts(1:maxCommentsPerCycle);
+end
+
 % Sort by timestamp
-[ts, ord] = sort(ts);
-cmts = cmts(ord);
+%[ts, ord] = sort(ts);
+%cmts = cmts(ord);
 
 for i = 1:numel(cmts)
     tok = regexp(cmts{i}, '^Trial\s+(\d+):\s*(.*)$', 'tokens');
@@ -51,6 +65,12 @@ for i = 1:numel(cmts)
 
     elseif ~inTrial
         continue   % ignore events outside a trial
+
+    % --- Task type: "Task Time discrimination task", etc. ---
+    elseif startsWith(event_text, 'Task')
+        if isempty(localData.task_type)
+            localData.task_type = strtrim(event_text(5:end));  % strip leading "Task"
+        end
 
     % --- Trial end: "End - Correct", "End - Time out", etc. ---
     elseif startsWith(event_text, 'End')
@@ -112,4 +132,39 @@ for i = 1:numel(cmts)
             end
         end
     end
+end
+
+% Adaptive timing: adjust timer period based on processing load
+processTime = toc(processStart);
+currentTimer = timerfind('Name', 'Jives_Acquire');
+if ~isempty(currentTimer)
+    timerData = currentTimer.UserData;
+    if isempty(timerData)
+        timerData = struct('basePeriod', 0.25, 'lastProcessTime', 0, 'overloadCount', 0);
+    end
+    
+    % If processing took >80% of period, increase period or count overloads
+    period = currentTimer.Period;
+    if processTime > 0.8 * period
+        timerData.overloadCount = timerData.overloadCount + 1;
+        if timerData.overloadCount >= 3  % 3 consecutive overloads
+            newPeriod = min(period * 1.5, 1.0);  % Cap at 1 second
+            currentTimer.Period = newPeriod;
+            fprintf('Increasing T1 period to %.3f s (processing: %.3f s)\n', newPeriod, processTime);
+            timerData.overloadCount = 0;
+        end
+    elseif processTime < 0.3 * period && period > timerData.basePeriod
+        % If consistently fast, gradually reduce period
+        timerData.overloadCount = max(timerData.overloadCount - 1, 0);
+        if timerData.overloadCount == 0
+            newPeriod = max(period * 0.9, timerData.basePeriod);
+            currentTimer.Period = newPeriod;
+            fprintf('Decreasing T1 period to %.3f s (processing: %.3f s)\n', newPeriod, processTime);
+        end
+    else
+        timerData.overloadCount = 0;
+    end
+    
+    timerData.lastProcessTime = processTime;
+    currentTimer.UserData = timerData;
 end
