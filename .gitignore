@@ -1,3 +1,11 @@
-.claude
-plans\
-test\
+# Ignored folders
+.claude/
+legacy/
+plans/
+test/
+
+# MATLAB autosave
+*.asv
+
+# macOS metadata
+.DS_Store

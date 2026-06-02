@@ -1,17 +1,17 @@
-function outputData = getJivesData()
+function getJivesData()
 % getJivesData  T1 acquisition callback for jivesBROnline.
 %
 % Flushes the cbmex comment buffer every 250 ms, parses Jives comments in
-% "Trial N: <event>" format. Returns a completed trial struct when a trial
-% ends, or [] if no trial completed this tick.
+% "Trial N: <event>" format. Appends each completed trial directly to the
+% global `trials` array (REVISED: replaces single-trial outputData return,
+% so all trials in a buffer flush are captured even if multiple complete
+% within one T1 tick).
 %
 % Trial parsing is adapted from doc/CommentTrialStructure.m.
 % Called by jivesBROnline.m — do not call directly.
 
-global inTrial
-persistent localData
-
-outputData = [];
+global inTrial trials  % REVISED: added trials
+persistent localData spikeBuf   % spikeBuf: rolling per-(ch,unit) spike-timestamp cell
 
 dbstop if error
 
@@ -23,47 +23,76 @@ TEMPLATE = struct( ...
     'Trial_type',          '', ...   %string： visual or memory 
     'Start',              NaN, ...   % absolute time (s)
     'End',                NaN, ...   % absolute time (s)
-    'Trialoutcome',       NaN, ...   % string: 'Correct', 'Time out', etc.
+    'Trialoutcome',       NaN, ...   % string: 'correct', 'timeout','brokefix' etc.
     'Choiceoutcome',      NaN, ...   % string: 'Correct choice', 'Wrong choice', 'No choice'
-    'Choosen_choice',     NaN, ...   % string: '1' or '2'
+    'Choosen_choice',     NaN, ...   % numeric: 1 or 2 or NaN
     'Choicetime',         NaN, ...   % absolute time of target acquisition (s)
     'Target_1_presented', NaN, ...   % absolute time targets came on (s)
     'Target_2_presented', NaN, ...   % absolute time targets came on (s)
     'Target_1_position',  [NaN NaN], ...  % [x, y] deg
-    'Target_2_position',  [NaN NaN]  ...  % [x, y] deg
+    'Target_2_position',  [NaN NaN],  ...  % [x, y] deg
+    'Requested_target_2_time_offset', NaN,...  %time onset offset for time delay task
+    'Fixation_point_off', NaN,... %time of fixation point of i.e. go cue
+    'spike_times', {{}}...        % {nCh x nUnitCols} cell of absolute spike timestamps within [Start, End]
 );
 
 % Flush both buffers every tick
-%spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear 
+spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear
+% --- accumulate sorted-unit spikes into rolling buffer (cols 1-2 = unsorted/hash, skip) ---
+if ~isempty(spikedata)
+    [nCh, nU] = size(spikedata);
+    if isempty(spikeBuf) || ~isequal(size(spikeBuf), [nCh nU])
+        spikeBuf = cell(nCh, nU);
+    end
+    for c = 1:nCh
+        for u = 3:nU
+            ts_new = spikedata{c, u};
+            if ~isempty(ts_new)
+                spikeBuf{c, u} = [spikeBuf{c, u}; ts_new(:)];
+            end
+        end
+    end
+end
 [cmts, ts, ~, ~] = cbmex('trialcomment', 1);  % flush comment buffer
+%{
 if isempty(cmts); return; end
-
-
+A=table(cmts);
+A.t =ts;
+A
+%}
+%try
 for i = 1:numel(cmts)
-    tok = regexp(cmts{i}, '^Trial\s+(\d+):\s*(.*)$', 'tokens');
+    tok = regexp(cmts{i}(1:92), '^Trial\s+(\d+):\s*(.*)$', 'tokens');
     if isempty(tok); continue; end   % skip "Experiment start/end: ..." lines
 
     trl_num    = str2double(tok{1}{1});
-    event_text = strtrim(tok{1}{2});
+    event_part = strsplit(tok{1}{2});
+    event_text = strjoin(event_part(1:end-1),' ');
     t          = ts(i);
+  %  disp(event_text);
 
     %First check whether the trial number changed or not
-    if exist('localData','var') && ~isempty(localData) && trl_num ~= localData.Trial_number
+    if exist('localData','var') && ~isempty(localData) 
         % Trial number changed — this means the previous trial ended without an "End - ..." comment
-        % Store the previous trial if it has a valid start time
+        % remove the trial
+        %{
         if ~isnan(localData.Start)
             outputData = localData;
             fprintf('Trial %3d  outcome: %-12s  choice: %s\n', ...
                 localData.Trial_number, num2str(localData.Trialoutcome), num2str(localData.Choosen_choice));
             disp('Incompelete trial ended without "End - ..." comment. Storing with whatever data we have.');
         end
-        inTrial   = false;
-        localData = []; 
-        
+        %}
+        if  trl_num ~= localData.Trial_number
+            inTrial   = false;
+            localData = [];
+            spikeBuf  = {};   % drop stale partial-trial spike accumulator
+        end
+
     end
 
     % --- Trial start ---
-    if contains(event_text, 'Start')
+    if inTrial==false && contains(event_text, 'Start')
         inTrial             = true;
         localData           = TEMPLATE;
         localData.Trial_number = trl_num;
@@ -87,10 +116,17 @@ for i = 1:numel(cmts)
     elseif contains(event_text, '-') && contains(event_text, 'choice')
         dash = strfind(event_text, '-');
         if isnan(localData.Choosen_choice)
-            localData.Choosen_choice = strtrim(event_text(dash+1:end));  % 1 or 2
+            tmp =  strtrim(event_text(dash(1)+1:end));%target_1 or target_2
+            if contains(tmp,'1')
+                localData.Choosen_choice = 1;
+            elseif contains(tmp,'2')
+                localData.Choosen_choice = 2;
+            else
+                 localData.Choosen_choice = NaN;
+            end
         end
         if isnan(localData.Choiceoutcome)
-            localData.Choiceoutcome = strtrim(event_text(1:dash-1));     % 'Correct choice' etc.
+            localData.Choiceoutcome = strtrim(event_text(1:dash(1)-1));     % 'Correct choice' etc.
         end
 
     % --- Outcome without number: "No choice" ---
@@ -98,13 +134,13 @@ for i = 1:numel(cmts)
         if isnan(localData.Choiceoutcome)
             localData.Choiceoutcome = event_text;
         end
-
+%
     % --- Choice time: target acquired ---
     elseif contains(event_text, 'Target 1 acquired') || contains(event_text, 'Target 2 acquired')
         if isnan(localData.Choicetime)
             localData.Choicetime = t;
         end
-
+%}
     % --- Targets on ---
     elseif contains(event_text, 'Target 1 presented')
         if isnan(localData.Target_1_presented)
@@ -118,7 +154,7 @@ for i = 1:numel(cmts)
     % --- Target positions: "Target 1 position (x, y) deg" ---
     elseif contains(event_text, 'Target 1 position') || contains(event_text, 'Target 2 position')
         coord_tok = regexp(event_text, ...
-            '^Target\s+(\d)\s+position\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)\s*deg$', ...
+            '^Target\s+(\d)\s+position\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)\s*deg.*', ...
             'tokens');
         if ~isempty(coord_tok)
             tgt_n = str2double(coord_tok{1}{1});
@@ -128,22 +164,66 @@ for i = 1:numel(cmts)
                 localData.(field) = xy;
             end
         end
+     %For time onset delay
+     elseif contains(event_text, 'Requested target 2 time offset')
+        if isnan(localData.Requested_target_2_time_offset)
+            time_pattern = '^(.*?)\s+([-+]?\d*\.?\d+)\s*ms.*';
+            tokens = regexp(event_text, time_pattern, 'tokens');
+            dur = str2double(tokens{1}{2});
+            localData.Requested_target_2_time_offset = dur;
+        end
+     %For fixation off
+    elseif contains(event_text,'Fixation point off','IgnoreCase',true)
+        if isnan(localData.Fixation_point_off)
+            localData.Fixation_point_off = t;
+        end
 
     % --- Trial end: "End - Correct", "End - Time out", etc. ---
     elseif contains(event_text, 'End')
         dash = strfind(event_text, '-');
         if ~isempty(dash)
-            localData.Trialoutcome = strtrim(event_text(dash+1:end));
+            localData.Trialoutcome = strtrim(event_text(dash(1)+1:end));
         end
         localData.End = t;
-        outputData = localData;
+        % --- slice spike buffer to this trial's window; trim past spikes ---
+        if ~isempty(spikeBuf)
+            localData.spike_times = cell(size(spikeBuf));
+            for c = 1:size(spikeBuf,1)
+                for u = 3:size(spikeBuf,2)
+                    ts_all = spikeBuf{c, u};
+                    if ~isempty(ts_all)
+                        mask = ts_all >= localData.Start & ts_all <= localData.End;
+                        localData.spike_times{c, u} = ts_all(mask);
+                        spikeBuf{c, u} = ts_all(ts_all > localData.End);
+                    end
+                end
+            end
+        end
+        % REVISED: append directly to global trials instead of returning a
+        % single outputData — prevents trial loss when >1 trial completes
+        % within the same 250 ms cbmex buffer flush.
+        if isempty(trials)
+            trials = localData;
+        else
+            %{
+            if localData.Choicetime < localData.Fixation_point_off
+                keyboard
+            end
+            %}
+            trials(end+1) = localData;
+        end
+        %
         fprintf('Trial %3d  outcome: %-12s  choice: %s\n', ...
             trl_num, num2str(localData.Trialoutcome), num2str(localData.Choosen_choice));
+        %}
         inTrial   = false;
         localData = [];
     end
     
 end
-
-
+%{
+catch
+    keyboard
+end
+%}
 end
