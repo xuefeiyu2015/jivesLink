@@ -28,13 +28,16 @@ FIX_COLOR    = [1 0 0];
 CTRL_H       = 60;
 ECC_NEAR     = 10;   % deg; near < ECC_NEAR, far >= ECC_NEAR
 
-% Sector labels in axPS index order (1–16)
-SECTOR_LABELS = {'NW-far','N-far','NE-far', ...
-                 'NW-near','N-near','NE-near', ...
-                 'W-far','E-far','W-near','E-near', ...
-                 'SW-near','S-near','SE-near', ...
-                 'SW-far','S-far','SE-far'};
 N_SECTORS = 16;
+% Sector centre angles and ecc bins in axPS index order (1–16)
+SECTOR_ANGLES = [135, 90, 45, 135, 90, 45, 180, 0, 180, 0, 225, 270, 315, 225, 270, 315];
+SECTOR_NEAR   = logical([0,0,0, 1,1,1, 0,0,1,1, 1,1,1, 0,0,0]);
+deg = char(176);
+SECTOR_LABELS = cell(N_SECTORS, 1);
+for k = 1:N_SECTORS
+    if SECTOR_NEAR(k); ineq = '<'; else; ineq = '>'; end
+    SECTOR_LABELS{k} = sprintf('%d%s, %s%d', SECTOR_ANGLES(k), deg, ineq, ECC_NEAR);
+end
 
 % ── Persistent state ──────────────────────────────────────────────────────
 persistent fig hChDD hUnitDD hRFt0 hRFt1 hPSTHt0 hPSTHt1 hAlignDD ...
@@ -74,7 +77,7 @@ end
 if isempty(fig) || ~isvalid(fig)
     fig = figure(nFig);
     clf(fig);
-    fig.UserData = struct('doClear', false);
+    fig.UserData = struct('doFullClear', false);
     set(fig, 'Position',[100 50 1400 960], ...
              'Name','Jives RF — Spatial PSTHs','NumberTitle','off');
     figH = fig.Position(4);
@@ -140,9 +143,10 @@ if isempty(fig) || ~isvalid(fig)
 
     % Clear button
     uicontrol(fig,'Style','pushbutton','Units','pixels', ...
-        'Position',[935 ye 60 22],'String','Clear', ...
-        'FontSize',10,'BackgroundColor',[0.9 0.7 0.7], ...
-        'Callback',@(~,~) clearAndRedraw(fig, nFig));
+        'Position',[935 ye 85 22],'String','Clear All', ...
+        'FontSize',10,'BackgroundColor',[0.85 0.4 0.4], ...
+        'ForegroundColor',[1 1 1], ...
+        'Callback',@(~,~) clearAllAndRedraw(fig, nFig));
 
     % Plot area — manual axes so every PSTH panel has identical dimensions
     pPlot = uipanel(fig,'Units','normalized','Position',[0,0,1,fd], ...
@@ -151,16 +155,18 @@ if isempty(fig) || ~isvalid(fig)
     % Layout constants (normalized within pPlot, y=0 at bottom)
     pw = 0.125;  ph = 0.135;   % panel width / height — same for all 16 PSTH axes
     gx = 0.010;  gy = 0.012;   % horizontal / vertical gap
+    gySep = 0.030;             % larger gap between near/far pair rows (top and bottom)
+    gyHM  = 0.050;             % gap between heatmap and adjacent panel rows
     lm = 0.065;  rm = 0.010;
-    bm = 0.050;  tm = 0.020;
+    bm = 0.020;  tm = 0.020;
 
     % 5 vertical row positions (bottom edge of each panel row)
     y5 = bm;                          % SW-far / S-far / SE-far  (bottom)
-    y4 = y5 + ph + gy;                % SW-near / S-near / SE-near
-    y3 = y4 + ph + gy;                % heatmap bottom edge
+    y4 = y5 + ph + gySep;             % SW-near / S-near / SE-near
+    y3 = y4 + ph + gyHM;              % heatmap bottom edge
     hmh = 2*ph + gy;                  % heatmap height = 2 panel heights
     y2 = y3 + hmh + 3*gy;            % NW-near / N-near / NE-near (extra gap clears heatmap title)
-    y1 = y2 + ph + gy;               % NW-far / N-far / NE-far  (top)
+    y1 = y2 + ph + gySep;             % NW-far / N-far / NE-far  (top)
     yWE = y3 + (hmh - ph)/2;         % W/E panels: vertically centered with heatmap
 
     % Horizontal column positions (left edge)
@@ -231,8 +237,11 @@ t_c_psth     = t_edges_psth(1:end-1) + BIN_MS/2;
 nBins        = numel(t_c_psth);
 
 % ── Detect parameter changes → full recompute ─────────────────────────────
-forceClear = isfield(fig.UserData, 'doClear') && fig.UserData.doClear;
-if forceClear; fig.UserData.doClear = false; end
+forceClear = isfield(fig.UserData, 'doFullClear') && fig.UserData.doFullClear;
+if forceClear
+    fig.UserData.doFullClear = false;
+    trials = [];
+end
 
 rfChanged   = forceClear                          || ...
               ~isequal(lastRFch,      chSel)      || ...
@@ -451,21 +460,17 @@ cb.Label.String = 'FR (sp/s)';
 cb.Label.FontSize = 7;
 
 % ── Draw 16 spatial PSTHs ─────────────────────────────────────────────────
-% Sectors in col 1 (leftmost axis per row): NW-far, NW-near, W-far, SW-near, SW-far
-leftSectors   = [1, 4, 7, 11, 14];
-% Sectors in row 6 (bottom axis per col): SW-far, S-far, SE-far
-bottomSectors = [14, 15, 16];
-
 % Shared y-axis range across all 16 sectors
 allMax = max(max(smMean + smSEM, [], 2));
 if isnan(allMax) || allMax <= 0; allMax = 1; end
 sharedYLim = [0, allMax * 1.1];
 
 clr = [0.2 0.5 0.9];
+noXSectors = [1, 2, 3, 11, 12, 13];   % upper panel of each near/far pair
 for s = 1:N_SECTORS
     drawPSTH(axPS(s), t_c_psth, smMean(s,:), smSEM(s,:), clr, ...
              psthN(s), SECTOR_LABELS{s}, sharedYLim, ...
-             ismember(s, bottomSectors), ismember(s, leftSectors));
+             ~ismember(s, noXSectors));
 end
 
 % Axis labels on the two reference panels
@@ -482,7 +487,7 @@ end
 
 
 % ══════════════════════════════════════════════════════════════════════════
-function drawPSTH(ax, t_c, fr_mn, fr_se, clr, n, lbl, yl, showX, showY)
+function drawPSTH(ax, t_c, fr_mn, fr_se, clr, n, lbl, yl, showX)
 cla(ax); hold(ax,'on');
 if n > 0
     fill(ax, [t_c, fliplr(t_c)], ...
@@ -493,10 +498,10 @@ end
 plot(ax, [0 0], yl, '--', 'Color',[0.6 0.6 0.6], 'LineWidth',0.8);
 xlim(ax, [t_c(1), t_c(end)]);
 ylim(ax, yl);
-title(ax, sprintf('%s  n=%d', lbl, n), 'FontSize',7, 'FontWeight','normal');
+t = title(ax, sprintf('%s  n=%d', lbl, n), 'FontSize',50, 'FontWeight','bold');
+set(t, 'Units','normalized', 'Position',[0.5, 1.02, 0]);
 set(ax, 'TickDir','out','FontSize',6,'Box','on');
 if ~showX; set(ax, 'XTickLabel',[]); end
-if ~showY; set(ax, 'YTickLabel',[]); end
 end
 
 
@@ -524,8 +529,9 @@ end
 
 
 % ══════════════════════════════════════════════════════════════════════════
-function clearAndRedraw(fig, nFig)
-fig.UserData.doClear = true;
+function clearAllAndRedraw(fig, nFig)
+% Wipe the entire trials array and all accumulators.
+fig.UserData.doFullClear = true;
 plotJivesReceptiveField(nFig);
 end
 
