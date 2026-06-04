@@ -46,9 +46,17 @@ persistent fig hChDD hUnitDD hRFt0 hRFt1 hPSTHt0 hPSTHt1 hAlignDD ...
            gridFR gridN nRFcorrect lastRFTrial lastRFch lastRFunitSel lastRFwin lastRFalign ...
            tgt_xy lastTgtTrial ...
            psthN psthMean psthM2 ...
-           lastPSTHTrial lastPSTHch lastPSTHunitSel lastPSTHwin lastPSTHalign
+           lastPSTHTrial lastPSTHch lastPSTHunitSel lastPSTHwin lastPSTHalign ...
+           activeRFTask clearWatermark
 
 if isempty(trials); return; end
+
+% ── Task gate: freeze figure if task has changed ──────────────────────────
+if isempty(activeRFTask)
+    activeRFTask = trials(end).Task;       % adopt task on first run / after Clear All
+elseif ~isequal(trials(end).Task, activeRFTask)
+    return;                                % wrong task — keep display frozen
+end
 
 % ── Read UI state (defaults before figure exists) ──────────────────────────
 alignOpts = {'Visual onset', 'Go signal (saccade)'};
@@ -77,7 +85,7 @@ end
 if isempty(fig) || ~isvalid(fig)
     fig = figure(nFig);
     clf(fig);
-    fig.UserData = struct('doFullClear', false);
+    fig.UserData = struct('doFullClear', false, 'doFitRF', false, 'rfFit', []);
     set(fig, 'Position',[100 50 1400 960], ...
              'Name','Jives RF — Spatial PSTHs','NumberTitle','off');
     figH = fig.Position(4);
@@ -141,12 +149,17 @@ if isempty(fig) || ~isvalid(fig)
         'Position',[758 ye 160 22],'String',alignOpts, ...
         'Value',1,'FontSize',10,'Callback',CB);
 
-    % Clear button
+    % Clear / Fit buttons
     uicontrol(fig,'Style','pushbutton','Units','pixels', ...
         'Position',[935 ye 85 22],'String','Clear All', ...
         'FontSize',10,'BackgroundColor',[0.85 0.4 0.4], ...
         'ForegroundColor',[1 1 1], ...
         'Callback',@(~,~) clearAllAndRedraw(fig, nFig));
+    uicontrol(fig,'Style','pushbutton','Units','pixels', ...
+        'Position',[1028 ye 70 22],'String','Fit RF', ...
+        'FontSize',10,'BackgroundColor',[0.3 0.7 0.4], ...
+        'ForegroundColor',[1 1 1], ...
+        'Callback',@(~,~) fitRFAndRedraw(fig, nFig));
 
     % Plot area — manual axes so every PSTH panel has identical dimensions
     pPlot = uipanel(fig,'Units','normalized','Position',[0,0,1,fd], ...
@@ -240,7 +253,8 @@ nBins        = numel(t_c_psth);
 forceClear = isfield(fig.UserData, 'doFullClear') && fig.UserData.doFullClear;
 if forceClear
     fig.UserData.doFullClear = false;
-    trials = [];
+    fig.UserData.rfFit       = [];
+    activeRFTask = [];
 end
 
 rfChanged   = forceClear                          || ...
@@ -260,22 +274,25 @@ nTrials = numel(trials);
 % ── Reset RF accumulators ─────────────────────────────────────────────────
 nG = numel(GRID_EDGES) - 1;
 if rfChanged || isempty(gridFR)
-    gridFR        = nan(nG, nG);
-    gridN         = zeros(nG, nG);
-    nRFcorrect    = 0;
-    tgt_xy        = [];
+    gridFR             = nan(nG, nG);
+    gridN              = zeros(nG, nG);
+    nRFcorrect         = 0;
+    tgt_xy             = [];
+    fig.UserData.rfFit = [];   % invalidate any existing fit
     lastRFch      = chSel;
     lastRFunitSel = unitSel;
     lastRFwin     = rfWin;
     lastRFalign   = alignStr;
     if forceClear
-        rfStart      = nTrials + 1;   % skip all existing trials
-        lastRFTrial  = nTrials;
-        lastTgtTrial = nTrials;
+        clearWatermark = nTrials;
+        rfStart        = nTrials + 1;
+        lastRFTrial    = nTrials;
+        lastTgtTrial   = nTrials;
     else
-        rfStart      = 1;
-        lastRFTrial  = 0;
-        lastTgtTrial = 0;
+        wm           = max(0, clearWatermark);   % 0 before any Clear All
+        rfStart      = wm + 1;
+        lastRFTrial  = wm;
+        lastTgtTrial = wm;
     end
 else
     rfStart = lastRFTrial + 1;
@@ -291,11 +308,12 @@ if psthChanged || isempty(psthN) || size(psthMean, 2) ~= nBins
     lastPSTHwin     = psthWin;
     lastPSTHalign   = alignStr;
     if forceClear
-        psthStart     = nTrials + 1;  % skip all existing trials
+        psthStart     = nTrials + 1;
         lastPSTHTrial = nTrials;
     else
-        psthStart     = 1;
-        lastPSTHTrial = 0;
+        wm            = max(0, clearWatermark);
+        psthStart     = wm + 1;
+        lastPSTHTrial = wm;
     end
 else
     psthStart = lastPSTHTrial + 1;
@@ -308,6 +326,7 @@ winDur = diff(rfWin) / 1000;
 loopStart = min(rfStart, psthStart);
 
 for n = loopStart : nTrials
+    if ~isequal(trials(n).Task, activeRFTask); continue; end
     correct = ischar(trials(n).Trialoutcome) && ...
               contains(trials(n).Trialoutcome, 'correct');
     sp = trials(n).spike_times;
@@ -430,6 +449,12 @@ else
     gridFR_sm = zeros(size(gridFR));
 end
 
+% ── 2-D Gaussian fit (triggered by Fit RF button) ────────────────────────
+if isfield(fig.UserData,'doFitRF') && fig.UserData.doFitRF
+    fig.UserData.doFitRF = false;
+    fig.UserData.rfFit   = fitGaussian2D(gridFR_sm, GRID_CTRS);
+end
+
 % ── Smoothed PSTH mean ± SEM ──────────────────────────────────────────────
 smMean = zeros(N_SECTORS, nBins);
 smSEM  = zeros(N_SECTORS, nBins);
@@ -449,9 +474,31 @@ if ~isempty(tgt_xy)
     scatter(axHM, tgt_xy(:,1), tgt_xy(:,2), 60, 'w','o','LineWidth',1.5);
 end
 scatter(axHM, 0, 0, 30, FIX_COLOR, 'filled');
+% Overlay 2-D Gaussian fit if available and valid
+rf = fig.UserData.rfFit;
+rfOK = ~isempty(rf) && all(isfinite([rf.x0, rf.y0, rf.sx, rf.sy])) && ...
+       rf.sx > 0 && rf.sx < 20 && rf.sy > 0 && rf.sy < 20;
+if rfOK
+    th = linspace(0, 2*pi, 200);
+    plot(axHM, rf.x0 + rf.sx*cos(th), rf.y0 + rf.sy*sin(th), ...
+         'w-', 'LineWidth', 2);
+    plot(axHM, rf.x0, rf.y0, 'w+', 'MarkerSize', 16, 'LineWidth', 2.5);
+    text(axHM, rf.x0, rf.y0 - rf.sy - 1.5, ...
+         sprintf('RF (%.1f°, %.1f°)', rf.x0, rf.y0), ...
+         'Color','w', 'FontSize',9, 'FontWeight','bold', ...
+         'HorizontalAlignment','center', 'VerticalAlignment','top');
+end
+% Re-lock axes so overlay plots cannot expand them
+set(axHM, 'XLim',[-20 20], 'YLim',[-20 20]);
+
 if unitSel == -1; unitLbl = 'all'; else; unitLbl = num2str(unitSel); end
-title(axHM, sprintf('Ch %d  Unit %s  (n=%d trials)', chSel, unitLbl, nRFcorrect), ...
-      'FontSize',10);
+if rfOK
+    titleStr = sprintf('Ch %d  Unit %s  (n=%d)   RF center: (%.1f°, %.1f°)', ...
+                       chSel, unitLbl, nRFcorrect, rf.x0, rf.y0);
+else
+    titleStr = sprintf('Ch %d  Unit %s  (n=%d trials)', chSel, unitLbl, nRFcorrect);
+end
+title(axHM, titleStr, 'FontSize',10);
 colormap(axHM, 'parula');
 set(axHM, 'YDir','normal','XTick',[],'YTick',[]);
 box(axHM,'on');
@@ -524,6 +571,45 @@ if isNear
     sIdx = near_map(secNum);
 else
     sIdx = far_map(secNum);
+end
+end
+
+
+% ══════════════════════════════════════════════════════════════════════════
+function fitRFAndRedraw(fig, nFig)
+fig.UserData.doFitRF = true;
+plotJivesReceptiveField(nFig);
+end
+
+
+% ══════════════════════════════════════════════════════════════════════════
+function fitResult = fitGaussian2D(gridFR_sm, GRID_CTRS)
+% Fit an elliptical 2-D Gaussian to gridFR_sm.
+% Returns struct with fields: x0, y0 (center deg), sx, sy (sigma deg), A, B.
+[gxm, gym] = meshgrid(GRID_CTRS, GRID_CTRS);
+z = gridFR_sm(:);  xv = gxm(:);  yv = gym(:);
+valid = ~isnan(z) & z > 0;
+if sum(valid) < 6
+    fitResult = [];  return;
+end
+xv = xv(valid);  yv = yv(valid);  zv = z(valid);
+
+[A0, idx] = max(zv);
+B0 = min(zv);
+x0 = xv(idx);  y0 = yv(idx);
+
+gauss2d = @(p,x,y) p(1)*exp(-((x-p(2)).^2/(2*p(4)^2) + (y-p(3)).^2/(2*p(5)^2))) + p(6);
+cost    = @(p) sum((zv - gauss2d(p, xv, yv)).^2);
+
+p0   = [A0-B0, x0, y0, 5, 5, B0];
+opts = optimset('Display','off','MaxIter',3000,'TolFun',1e-8,'TolX',1e-6);
+try
+    pFit     = fminsearch(cost, p0, opts);
+    fitResult = struct('x0',pFit(2), 'y0',pFit(3), ...
+                       'sx',abs(pFit(4)), 'sy',abs(pFit(5)), ...
+                       'A',pFit(1), 'B',pFit(6));
+catch
+    fitResult = [];
 end
 end
 
