@@ -52,6 +52,9 @@ persistent fig hChDD hUnitDD hRFt0 hRFt1 hPSTHt0 hPSTHt1 hAlignDD ...
 if isempty(trials); return; end
 
 % ── Task gate: freeze figure if task has changed ──────────────────────────
+if ~isfield(trials(end), 'Task') || isempty(trials(end).Task)
+    return;                                % task not yet known — wait for next tick
+end
 if isempty(activeRFTask)
     activeRFTask = trials(end).Task;       % adopt task on first run / after Clear All
 elseif ~isequal(trials(end).Task, activeRFTask)
@@ -215,7 +218,7 @@ if isempty(fig) || ~isvalid(fig)
 end
 
 % ── Refresh channel/unit dropdowns ────────────────────────────────────────
-if ~isempty(trials(end).spike_times)
+if isfield(trials(end), 'spike_times') && ~isempty(trials(end).spike_times)
     nCh = size(trials(end).spike_times, 1);
     if isempty(lastNCh) || lastNCh ~= nCh
         hChDD.String = arrayfun(@num2str, 1:nCh, 'uni', 0);
@@ -327,8 +330,9 @@ winDur = diff(rfWin) / 1000;
 loopStart = min(rfStart, psthStart);
 
 for n = loopStart : nTrials
-    if ~isequal(trials(n).Task, activeRFTask); continue; end
-    correct = ischar(trials(n).Trialoutcome) && ...
+    if ~isfield(trials(n), 'Task')         || ~isequal(trials(n).Task, activeRFTask); continue; end
+    if ~isfield(trials(n), 'spike_times'); continue; end
+    correct = isfield(trials(n), 'Trialoutcome') && ischar(trials(n).Trialoutcome) && ...
               contains(trials(n).Trialoutcome, 'correct');
     sp = trials(n).spike_times;
     if isempty(sp) || chSel > size(sp, 1); continue; end
