@@ -270,6 +270,7 @@ psthChanged = forceClear                          || ...
 
 % ── Snapshot current trial count before any reset ────────────────────────
 nTrials = numel(trials);
+if isempty(clearWatermark); clearWatermark = 0; end
 
 % ── Reset RF accumulators ─────────────────────────────────────────────────
 nG = numel(GRID_EDGES) - 1;
@@ -482,7 +483,7 @@ if rfOK
     th = linspace(0, 2*pi, 200);
     plot(axHM, rf.x0 + rf.sx*cos(th), rf.y0 + rf.sy*sin(th), ...
          'w-', 'LineWidth', 2);
-    plot(axHM, rf.x0, rf.y0, 'w+', 'MarkerSize', 16, 'LineWidth', 2.5);
+    plot(axHM, rf.x0, rf.y0, 'r+', 'MarkerSize', 16, 'LineWidth', 2.5);
     text(axHM, rf.x0, rf.y0 - rf.sy - 1.5, ...
          sprintf('RF (%.1f°, %.1f°)', rf.x0, rf.y0), ...
          'Color','w', 'FontSize',9, 'FontWeight','bold', ...
@@ -601,7 +602,7 @@ x0 = xv(idx);  y0 = yv(idx);
 gauss2d = @(p,x,y) p(1)*exp(-((x-p(2)).^2/(2*p(4)^2) + (y-p(3)).^2/(2*p(5)^2))) + p(6);
 cost    = @(p) sum((zv - gauss2d(p, xv, yv)).^2);
 
-p0   = [A0-B0, x0, y0, 5, 5, B0];
+p0   = [A0-B0, x0, y0, 2, 2, B0];
 opts = optimset('Display','off','MaxIter',3000,'TolFun',1e-8,'TolX',1e-6);
 try
     pFit     = fminsearch(cost, p0, opts);
