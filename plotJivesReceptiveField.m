@@ -326,8 +326,13 @@ end
 winSec = rfWin / 1000;
 winDur = diff(rfWin) / 1000;
 
-% ── Incremental accumulation ─────────────────────────────────────────────
+% ── Early exit if nothing to do ──────────────────────────────────────────
 loopStart = min(rfStart, psthStart);
+if loopStart > nTrials && ~rfChanged && ~psthChanged && ~forceClear
+    return;   % no new trials, no parameter change — display already current
+end
+
+% ── Incremental accumulation ─────────────────────────────────────────────
 
 for n = loopStart : nTrials
     if ~isfield(trials(n), 'Task')         || ~isequal(trials(n).Task, activeRFTask); continue; end
@@ -469,6 +474,11 @@ for s = 1:N_SECTORS
         smSEM(s,:) = conv(sqrt(psthM2(s,:)/(psthN(s)-1)) / sqrt(psthN(s)), ...
                           kern, 'same');
     end
+end
+
+% ── Guard: skip drawing if figure or axes were closed ─────────────────────
+if ~isvalid(fig) || ~isvalid(axHM) || any(~isvalid(axPS))
+    return;
 end
 
 % ── Draw heatmap ──────────────────────────────────────────────────────────
