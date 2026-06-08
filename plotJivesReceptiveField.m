@@ -481,45 +481,65 @@ if ~isvalid(fig) || ~isvalid(axHM) || any(~isvalid(axPS))
     return;
 end
 
-% ── Draw heatmap ──────────────────────────────────────────────────────────
-cla(axHM); hold(axHM,'on');
-imagesc(axHM, GRID_CTRS, GRID_CTRS, gridFR_sm);
-axis(axHM, [-20 20 -20 20]); axis(axHM,'equal'); axis(axHM,'square');
+% ── Draw heatmap (reuse objects — no cla) ─────────────────────────────────
+hImg = findobj(axHM, 'Tag','rf_img');
+if isempty(hImg)
+    hold(axHM,'on');
+    hImg = imagesc(axHM, GRID_CTRS, GRID_CTRS, gridFR_sm); hImg.Tag = 'rf_img';
+    axis(axHM, [-20 20 -20 20]); axis(axHM,'equal'); axis(axHM,'square');
+    scatter(axHM, 0, 0, 30, FIX_COLOR, 'filled', 'Tag','rf_fix');
+    scatter(axHM, nan, nan, 60, 'w','o','LineWidth',1.5,'Tag','rf_tgt');
+    plot(axHM, nan, nan, 'w-','LineWidth',2,'Tag','rf_ell');
+    plot(axHM, nan, nan, 'r+','MarkerSize',16,'LineWidth',2.5,'Tag','rf_cross');
+    text(axHM, 0, 0, '', 'Color','w','FontSize',9,'FontWeight','bold', ...
+         'HorizontalAlignment','center','VerticalAlignment','top', ...
+         'Tag','rf_lbl','Visible','off');
+    colormap(axHM,'parula');
+    set(axHM,'YDir','normal','XTick',[],'YTick',[]);
+    box(axHM,'on');
+    cb = colorbar(axHM,'Location','eastoutside','FontSize',7);
+    cb.Label.String = 'FR (sp/s)';  cb.Label.FontSize = 7;
+else
+    set(hImg, 'CData', gridFR_sm);
+end
+
+% Update target scatter
+hTgt = findobj(axHM,'Tag','rf_tgt');
 if ~isempty(tgt_xy)
-    scatter(axHM, tgt_xy(:,1), tgt_xy(:,2), 60, 'w','o','LineWidth',1.5);
+    set(hTgt,'XData',tgt_xy(:,1),'YData',tgt_xy(:,2));
+else
+    set(hTgt,'XData',nan,'YData',nan);
 end
-scatter(axHM, 0, 0, 30, FIX_COLOR, 'filled');
-% Overlay 2-D Gaussian fit if available and valid
-rf = fig.UserData.rfFit;
-rfOK = ~isempty(rf) && all(isfinite([rf.x0, rf.y0, rf.sx, rf.sy])) && ...
+
+% Update fit overlay
+rf   = fig.UserData.rfFit;
+rfOK = ~isempty(rf) && all(isfinite([rf.x0,rf.y0,rf.sx,rf.sy])) && ...
        rf.sx > 0 && rf.sx < 20 && rf.sy > 0 && rf.sy < 20;
+hEll   = findobj(axHM,'Tag','rf_ell');
+hCross = findobj(axHM,'Tag','rf_cross');
+hLbl   = findobj(axHM,'Tag','rf_lbl');
 if rfOK
-    th = linspace(0, 2*pi, 200);
-    plot(axHM, rf.x0 + rf.sx*cos(th), rf.y0 + rf.sy*sin(th), ...
-         'w-', 'LineWidth', 2);
-    plot(axHM, rf.x0, rf.y0, 'r+', 'MarkerSize', 16, 'LineWidth', 2.5);
-    text(axHM, rf.x0, rf.y0 - rf.sy - 1.5, ...
-         sprintf('RF (%.1f°, %.1f°)', rf.x0, rf.y0), ...
-         'Color','w', 'FontSize',9, 'FontWeight','bold', ...
-         'HorizontalAlignment','center', 'VerticalAlignment','top');
+    th = linspace(0,2*pi,200);
+    set(hEll,   'XData',rf.x0+rf.sx*cos(th),'YData',rf.y0+rf.sy*sin(th));
+    set(hCross, 'XData',rf.x0,'YData',rf.y0);
+    set(hLbl,   'Position',[rf.x0, rf.y0-rf.sy-1.5, 0], ...
+                'String',sprintf('RF (%.1f%s, %.1f%s)',rf.x0,char(176),rf.y0,char(176)), ...
+                'Visible','on');
+else
+    set(hEll,  'XData',nan,'YData',nan);
+    set(hCross,'XData',nan,'YData',nan);
+    set(hLbl,  'Visible','off');
 end
-% Re-lock axes so overlay plots cannot expand them
-set(axHM, 'XLim',[-20 20], 'YLim',[-20 20]);
+set(axHM,'XLim',[-20 20],'YLim',[-20 20]);
 
 if unitSel == -1; unitLbl = 'all'; else; unitLbl = num2str(unitSel); end
 if rfOK
-    titleStr = sprintf('Ch %d  Unit %s  (n=%d)   RF center: (%.1f°, %.1f°)', ...
-                       chSel, unitLbl, nRFcorrect, rf.x0, rf.y0);
+    titleStr = sprintf('Ch %d  Unit %s  (n=%d)   RF: (%.1f%s, %.1f%s)', ...
+                       chSel, unitLbl, nRFcorrect, rf.x0,char(176),rf.y0,char(176));
 else
     titleStr = sprintf('Ch %d  Unit %s  (n=%d trials)', chSel, unitLbl, nRFcorrect);
 end
 title(axHM, titleStr, 'FontSize',10);
-colormap(axHM, 'parula');
-set(axHM, 'YDir','normal','XTick',[],'YTick',[]);
-box(axHM,'on');
-cb = colorbar(axHM, 'Location','eastoutside','FontSize',7);
-cb.Label.String = 'FR (sp/s)';
-cb.Label.FontSize = 7;
 
 % ── Draw 16 spatial PSTHs ─────────────────────────────────────────────────
 % Shared y-axis range across all 16 sectors
@@ -550,20 +570,34 @@ end
 
 % ══════════════════════════════════════════════════════════════════════════
 function drawPSTH(ax, t_c, fr_mn, fr_se, clr, n, lbl, yl, showX)
-cla(ax); hold(ax,'on');
-if n > 0
-    fill(ax, [t_c, fliplr(t_c)], ...
-             [fr_mn+fr_se, fliplr(fr_mn-fr_se)], ...
-             clr, 'FaceAlpha',0.25, 'EdgeColor','none');
-    plot(ax, t_c, fr_mn, 'Color',clr, 'LineWidth',1.2);
+% Reuse graphics objects (no cla) to avoid WebContextMenuController errors
+hFill = findobj(ax, 'Tag','psth_fill');
+hLine = findobj(ax, 'Tag','psth_line');
+hZero = findobj(ax, 'Tag','psth_zero');
+
+if isempty(hFill)
+    hold(ax,'on');
+    hFill = fill(ax, [nan nan],[nan nan], clr, ...
+                 'FaceAlpha',0.25,'EdgeColor','none','Tag','psth_fill');
+    hLine = plot(ax, nan, nan, 'Color',clr,'LineWidth',1.2,'Tag','psth_line');
+    hZero = plot(ax, [0 0],[0 1],'--','Color',[0.6 0.6 0.6],'LineWidth',0.8,'Tag','psth_zero');
+    set(ax,'TickDir','out','FontSize',6,'Box','on');
+    t = title(ax, sprintf('%s  n=%d',lbl,n), 'FontSize',10,'FontWeight','bold');
+    set(t,'Units','normalized','Position',[0.5, 1.02, 0]);
+    if ~showX; set(ax,'XTickLabel',[]); end
 end
-plot(ax, [0 0], yl, '--', 'Color',[0.6 0.6 0.6], 'LineWidth',0.8);
-xlim(ax, [t_c(1), t_c(end)]);
+
+if n > 0
+    set(hFill,'XData',[t_c, fliplr(t_c)],'YData',[fr_mn+fr_se, fliplr(fr_mn-fr_se)]);
+    set(hLine,'XData',t_c,'YData',fr_mn);
+else
+    set(hFill,'XData',[nan nan],'YData',[nan nan]);
+    set(hLine,'XData',nan,'YData',nan);
+end
+set(hZero,'XData',[0 0],'YData',yl);
+xlim(ax,[t_c(1), t_c(end)]);
 ylim(ax, yl);
-t = title(ax, sprintf('%s  n=%d', lbl, n), 'FontSize',50, 'FontWeight','bold');
-set(t, 'Units','normalized', 'Position',[0.5, 1.02, 0]);
-set(ax, 'TickDir','out','FontSize',6,'Box','on');
-if ~showX; set(ax, 'XTickLabel',[]); end
+ax.Title.String = sprintf('%s  n=%d', lbl, n);
 end
 
 

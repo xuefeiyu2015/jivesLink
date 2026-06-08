@@ -15,13 +15,112 @@ global trials
 if isempty(trials) || numel(trials) < 2; return; end
 
 %try
+ %initialization
+persistent fig2 dhandle bhandle thandle nFit time_count ax1 htxt ...
+           ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R;
+if isempty(fig2) || ~isvalid(fig2)
+    fig2 = figure(nFig);
+    fig2.UserData = struct('trialOffset', 0, 'doClear', false);
+
+    ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
+    dhandle  = animatedline('Color','r','Marker','.','MarkerSize',20,'LineStyle','none','DisplayName','Psychometric function');
+
+    hold on
+    plot([0,0],[0,1],'--k');
+    plot([-250,250],[0.5,0.5],'--k');
+
+    nFit = animatedline('Color','r','LineStyle','-','LineWidth',2);
+
+    xlabel('Onset time delay(s)');
+
+    ylim([0 1]);
+    yticks([0,0.5,1]);
+    xlim([-250,250]);
+    ylabel('Proprotion');
+    title('Psychometric function', 'FontSize', 15);
+
+    % Persistent text annotation — updated in-place each tick
+    htxt = text(ax1, 0.98, 0.05, '', ...
+        'Units', 'normalized', ...
+        'HorizontalAlignment', 'right', ...
+        'VerticalAlignment', 'bottom', ...
+        'FontSize', 11);
+
+    ax2 = subplot(4,2,5,'Parent',fig2);
+    box off
+    bhandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Bias');
+    title('Bias', 'FontSize', 15)
+    ax3 = subplot(4,2,6,'Parent',fig2);
+    box off
+    thandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Threshold');
+    title('Treshold', 'FontSize', 15);
+
+    % RT vs asynchrony — leftward onset first (stimulus_dir < 0)
+    ax_rtL = subplot(4,2,7,'Parent',fig2);
+    box off
+    rtdot_L = animatedline(ax_rtL,'Color','b','Marker','.','MarkerSize',16,'LineStyle','none');
+    rtfit_L = animatedline(ax_rtL,'Color','b','LineStyle','-','LineWidth',1.5);
+    xlabel(ax_rtL,'Onset asynchrony (ms)');
+    ylabel(ax_rtL,'RT (s)');
+    title(ax_rtL,'RT — Leftward onset first', 'FontSize', 15);
+    rtxt_L  = text(ax_rtL, 0.98, 0.95, '', 'Units','normalized', ...
+        'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
+
+    % RT vs asynchrony — rightward onset first (stimulus_dir > 0)
+    ax_rtR = subplot(4,2,8,'Parent',fig2);
+    box off
+    rtdot_R = animatedline(ax_rtR,'Color','r','Marker','.','MarkerSize',16,'LineStyle','none');
+    rtfit_R = animatedline(ax_rtR,'Color','r','LineStyle','-','LineWidth',1.5);
+    xlabel(ax_rtR,'Onset asynchrony (ms)');
+    ylabel(ax_rtR,'RT (s)');
+    title(ax_rtR,'RT — Rightward onset first', 'FontSize', 15);
+    rtxt_R  = text(ax_rtR, 0.98, 0.95, '', 'Units','normalized', ...
+        'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
+
+    % Clear button — top-right corner
+    uicontrol(fig2, 'Style', 'pushbutton', 'Units', 'normalized', ...
+        'Position', [0.86, 0.965, 0.12, 0.030], ...
+        'String', 'Clear', 'FontSize', 10, ...
+        'BackgroundColor', [0.85 0.4 0.4], 'ForegroundColor', [1 1 1], ...
+        'Callback', @(~,~) clearPsychData(fig2));
+
+    time_count = 0;
+end
+
+% --- Handle clear request (set by button callback on previous tick) ---
+if fig2.UserData.doClear
+    fig2.UserData.trialOffset = numel(trials);
+    fig2.UserData.doClear     = false;
+    time_count = 0;
+    clearpoints(dhandle); clearpoints(nFit);
+    clearpoints(bhandle); clearpoints(thandle);
+    clearpoints(rtdot_L); clearpoints(rtfit_L); rtxt_L.String = '';
+    clearpoints(rtdot_R); clearpoints(rtfit_R); rtxt_R.String = '';
+    htxt.String = '';
+    drawnow;
+    return;
+end
+
+% --- Apply trial offset (set by Clear button) ---
+offset = fig2.UserData.trialOffset;
+if offset > 0 && offset + 1 <= numel(trials)
+    tAll = trials(offset+1:end);
+else
+    if offset >= numel(trials)
+        disp('plotJivesPsychometrics: trials refreshed externally — using full trials array');
+        fig2.UserData.trialOffset = 0;
+    end
+    tAll = trials;
+end
+if isempty(tAll) || numel(tAll) < 2; return; end
+
 % --- Trials with a valid choice ---
-valid  = ~isnan([trials.Choosen_choice]);
+valid  = ~isnan([tAll.Choosen_choice]);
 if valid(end)==0
     return
 end
 
-tValid = trials(valid);
+tValid = tAll(valid);
 if numel(tValid) < 1; return; end
 
 % Numeric choice (1 or 2)
@@ -50,7 +149,7 @@ choiceLR(direction == 1 & chooseN==2) = 0; %leftward choices
 %Loop over the time asychrony
 stimulus = [tValid.Requested_target_2_time_offset]';
 stimulus_dir = stimulus .* direction;
-[stim_levels, ~, idx] = unique(stimulus_dir);   
+[stim_levels, ~, idx] = unique(stimulus_dir);
 pRight = accumarray(idx, choiceLR==1, [], @mean);
 
 %if numel(tValid) >10
@@ -74,73 +173,11 @@ pRight = accumarray(idx, choiceLR==1, [], @mean);
  end
 
  %Fitted curve
- xx = linspace(-250, 250, 100); 
+ xx = linspace(-250, 250, 100);
  yy = 1./(1+exp(-(b0 + b1*xx)));      % fitted psy
 %end
- %initialization
-persistent fig2 dhandle bhandle thandle nFit time_count ax1 htxt ...
-           ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R;
-if isempty(fig2) || ~isvalid(fig2)
-    fig2 = figure(nFig);
-    ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
-    dhandle  = animatedline('Color','r','Marker','.','MarkerSize',20,'LineStyle','none','DisplayName','Psychometric function');
 
-    hold on
-    plot([0,0],[0,1],'--k');
-    plot([min(xx),max(xx)],[0.5,0.5],'--k');
-
-    nFit = animatedline('Color','r','LineStyle','-','LineWidth',2);
-
-    %plot(NaN,NaN,'r-','LineWidth',2);
-    xlabel('Onset time delay(s)');
-
-    ylim([0 1]);
-    yticks([0,0.5,1]);
-    xlim([-250,250]);
-    ylabel('Proprotion');
-    title('Psychometric function');
-
-    % Persistent text annotation — updated in-place each tick
-    htxt = text(ax1, 0.98, 0.05, '', ...
-        'Units', 'normalized', ...
-        'HorizontalAlignment', 'right', ...
-        'VerticalAlignment', 'bottom', ...
-        'FontSize', 11);
-
-    ax2 = subplot(4,2,5,'Parent',fig2);
-    box off
-    bhandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Bias');
-    title('Bias')
-    ax3 = subplot(4,2,6,'Parent',fig2);
-    box off
-    thandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Threshold');
-    title('Treshold');
-
-    % RT vs asynchrony — leftward onset first (stimulus_dir < 0)
-    ax_rtL = subplot(4,2,7,'Parent',fig2);
-    box off
-    rtdot_L = animatedline(ax_rtL,'Color','b','Marker','.','MarkerSize',16,'LineStyle','none');
-    rtfit_L = animatedline(ax_rtL,'Color','b','LineStyle','-','LineWidth',1.5);
-    xlabel(ax_rtL,'Onset asynchrony (ms)');
-    ylabel(ax_rtL,'RT (s)');
-    title(ax_rtL,'RT — Leftward onset first');
-    rtxt_L  = text(ax_rtL, 0.98, 0.95, '', 'Units','normalized', ...
-        'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
-
-    % RT vs asynchrony — rightward onset first (stimulus_dir > 0)
-    ax_rtR = subplot(4,2,8,'Parent',fig2);
-    box off
-    rtdot_R = animatedline(ax_rtR,'Color','r','Marker','.','MarkerSize',16,'LineStyle','none');
-    rtfit_R = animatedline(ax_rtR,'Color','r','LineStyle','-','LineWidth',1.5);
-    xlabel(ax_rtR,'Onset asynchrony (ms)');
-    ylabel(ax_rtR,'RT (s)');
-    title(ax_rtR,'RT — Rightward onset first');
-    rtxt_R  = text(ax_rtR, 0.98, 0.95, '', 'Units','normalized', ...
-        'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
-
-    time_count = 0;
-end
-time_count= time_count+1;
+time_count = time_count + 1;
 
 %Update the plot
 clearpoints(dhandle);
@@ -201,6 +238,12 @@ catch
     keyboard
 end
 %}
+end
+
+function clearPsychData(fig)
+    if ~isempty(fig) && isvalid(fig)
+        fig.UserData.doClear = true;
+    end
 end
 
 %{
