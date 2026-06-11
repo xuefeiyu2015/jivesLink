@@ -64,6 +64,15 @@ function onStart(fig, hStart, hStatus)
         return
     end
 
+    % Recording check
+    answer = questdlg( ...
+        'Have you started recording in BlackRock? Start recording to continue.', ...
+        'BlackRock Check', 'Yes', 'Yes');
+    if isempty(answer)
+        uialert(fig, 'I assume you have started recording. I will continue.', ...
+                'BlackRock Check', 'Icon', 'info');
+    end
+
     % Check for open plot figures from a previous session
     openFigs = findobj(0, 'Type', 'figure');
     openFigs(openFigs == fig) = [];   % exclude the GUI window itself
