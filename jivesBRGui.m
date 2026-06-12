@@ -7,31 +7,31 @@ function jivesBRGui()
 
 %% Build window
 fig = uifigure('Name',     'Jives BR Online', ...
-               'Position', [200 400 360 200], ...
+               'Position', [200 350 360 305], ...
                'Resize',   'off', ...
                'CloseRequestFcn', @(f,~) onCloseWindow(f));
 
 fig.UserData = struct('T1', [], 'T2', [], 'T_ui', [], 'running', false);
 
 %% Status row
-uilabel(fig, 'Position', [20 162 55 20], 'Text', 'Status:');
-hStatus = uilabel(fig, 'Position', [75 162 100 20], ...
+uilabel(fig, 'Position', [20 267 55 20], 'Text', 'Status:');
+hStatus = uilabel(fig, 'Position', [75 267 100 20], ...
     'Text', 'Stopped', 'FontColor', [0.7 0.1 0.1]);
 
-uilabel(fig, 'Position', [190 162 45 20], 'Text', 'Trials:');
-hTrials = uilabel(fig, 'Position', [238 162 80 20], 'Text', '0');
+uilabel(fig, 'Position', [190 267 45 20], 'Text', 'Trials:');
+hTrials = uilabel(fig, 'Position', [238 267 80 20], 'Text', '0');
 
 %% Task row
-uilabel(fig, 'Position', [20 128 40 22], 'Text', 'Task:');
+uilabel(fig, 'Position', [20 233 40 22], 'Text', 'Task:');
 hTask = uieditfield(fig, 'text', ...
-    'Position',  [62 128 278 22], ...
+    'Position',  [62 233 278 22], ...
     'Value',     'Waiting for task info...', ...
     'Editable',  'off', ...
     'FontColor', [0.4 0.4 0.4]);
 
 %% Buttons
 hStart = uibutton(fig, 'push', ...
-    'Position',       [20 50 150 50], ...
+    'Position',       [20 155 150 50], ...
     'Text',           'Start', ...
     'FontSize',       15, ...
     'FontWeight',     'bold', ...
@@ -41,12 +41,37 @@ hStart.ButtonPushedFcn = @(~,~) onStart(fig, hStart, hStatus);
 fig.UserData.startBtn = hStart;   % store so onCloseAll can re-enable it
 fig.UserData.hTask    = hTask;    % store so onCloseAll can reset it
 uibutton(fig, 'push', ...
-    'Position',       [190 50 150 50], ...
+    'Position',       [190 155 150 50], ...
     'Text',           'Close All', ...
     'FontSize',       15, ...
     'FontWeight',     'bold', ...
     'BackgroundColor', [0.85 0.33 0.10], ...
     'ButtonPushedFcn', @(~,~) onCloseAll(fig, hStatus));
+
+%% Export section
+uilabel(fig, 'Position', [20 122 320 20], ...
+    'Text', 'Export Data', 'FontWeight', 'bold');
+uilabel(fig, 'Position', [20 96 42 20], 'Text', 'Path:');
+hExportPath = uieditfield(fig, 'text', ...
+    'Position', [65 94 200 22], ...
+    'Value',    pwd, ...
+    'Tooltip',  'Directory where log files are saved');
+uibutton(fig, 'push', ...
+    'Position',       [270 94 70 22], ...
+    'Text',           'Browse...', ...
+    'ButtonPushedFcn', @(~,~) onBrowse(fig));
+chkComments = uicheckbox(fig, ...
+    'Position', [20 62 165 22], ...
+    'Text',     'Export comments (.txt)', ...
+    'Value',    true);
+chkTrials = uicheckbox(fig, ...
+    'Position', [200 62 150 22], ...
+    'Text',     'Export trials (.csv)', ...
+    'Value',    true);
+
+fig.UserData.hExportPath = hExportPath;
+fig.UserData.chkComments = chkComments;
+fig.UserData.chkTrials   = chkTrials;
 
 %% UI update timer — refreshes status, trial count, and task label every 0.5 s
 T_ui = timer('Name', 'Jives_UI', 'Period', 0.5, 'ExecutionMode', 'fixedRate', ...
@@ -65,12 +90,15 @@ function onStart(fig, hStart, hStatus)
     end
 
     % Recording check
-    answer = questdlg( ...
-        'Have you started recording in BlackRock? Start recording to continue.', ...
-        'BlackRock Check', 'Yes', 'Yes');
-    if isempty(answer)
-        uialert(fig, 'I assume you have started recording. I will continue.', ...
-                'BlackRock Check', 'Icon', 'info');
+    answer = uiconfirm(fig, ...
+        'Have you started recording in BlackRock?', ...
+        'BlackRock Check', ...
+        'Options',       {'Yes, continue', 'Cancel'}, ...
+        'DefaultOption', 'Yes, continue', ...
+        'CancelOption',  'Cancel', ...
+        'Icon',          'question');
+    if strcmp(answer, 'Cancel')
+        return
     end
 
     % Check for open plot figures from a previous session
@@ -91,9 +119,28 @@ function onStart(fig, hStart, hStatus)
     end
 
     % Reset globals
-    global trials inTrial
+    global trials inTrial fhComments fhTrials
     trials  = struct([]);
     inTrial = false;
+
+    % Open streaming log files for this session (conditional on checkboxes)
+    dtStr      = datestr(now, 'yyyymmdd_HHMMSS');
+    exportPath = fig.UserData.hExportPath.Value;
+    if fig.UserData.chkComments.Value
+        commentFile = fullfile(exportPath, ['comments_' dtStr '.txt']);
+        fhComments  = fopen(commentFile, 'w');
+        fprintf('[Export] comments → %s\n', commentFile);
+    else
+        fhComments = [];
+    end
+    if fig.UserData.chkTrials.Value
+        trialFile = fullfile(exportPath, ['trials_' dtStr '.csv']);
+        fhTrials  = fopen(trialFile, 'w');
+        fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_point_off\n');
+        fprintf('[Export] trials   → %s\n', trialFile);
+    else
+        fhTrials = [];
+    end
 
     % Connect cbmex
     try
@@ -140,6 +187,11 @@ function onCloseAll(fig, hStatus)
     try; cbmex('trialconfig', 0); catch; end
     try; cbmex('close');          catch; end
 
+    % Close log file handles before clearing globals
+    global fhComments fhTrials
+    if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
+    if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
+
     % Clear globals
     global trials inTrial
     trials  = struct([]);
@@ -183,6 +235,9 @@ function onCloseWindow(fig)
         stopTimers(ud);
         try; cbmex('trialconfig', 0); catch; end
         try; cbmex('close');          catch; end
+        global fhComments fhTrials
+        if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
+        if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
     end
     delete(fig);
 end
@@ -221,5 +276,14 @@ function stopTimers(ud)
         if ~isempty(t) && isvalid(t)
             stop(t); delete(t);
         end
+    end
+end
+
+%% =========================================================================
+
+function onBrowse(fig)
+    folder = uigetdir(fig.UserData.hExportPath.Value, 'Select export folder');
+    if folder ~= 0
+        fig.UserData.hExportPath.Value = folder;
     end
 end

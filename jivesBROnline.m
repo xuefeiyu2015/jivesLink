@@ -29,6 +29,11 @@ end
 if exist('T1','var') && isvalid(T1), stop(T1); delete(T1); end
 if exist('T2','var') && isvalid(T2), stop(T2); delete(T2); end
 cbmex('close')
+try
+    global fhComments fhTrials;
+    if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); end
+    if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   end
+catch; end
 clear global
 close all;
 
@@ -48,6 +53,16 @@ inTrial = false;
 
 global trials;
 trials =struct([]);
+
+global fhComments fhTrials;
+dtStr       = datestr(now, 'yyyymmdd_HHMMSS');
+commentFile = ['comments_' dtStr '.txt'];
+trialFile   = ['trials_'   dtStr '.csv'];
+fhComments  = fopen(commentFile, 'w');
+fhTrials    = fopen(trialFile,   'w');
+fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_point_off\n');
+fprintf('[Export] comments → %s\n', fullfile(pwd, commentFile));
+fprintf('[Export] trials   → %s\n', fullfile(pwd, trialFile));
 
 % REVISED: removed base-workspace `data` variable — getJivesData now
 % appends directly to global `trials`; jivesAnalysisSwitchyard reads it.
@@ -74,4 +89,7 @@ start(T2);
  stop(T2); delete(T2);
  cbmex('trialconfig', 0);
  cbmex('close');
+ global fhComments fhTrials;
+ if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
+ if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
 %}
