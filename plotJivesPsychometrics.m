@@ -16,20 +16,24 @@ if isempty(trials) || numel(trials) < 2; return; end
 
 %try
  %initialization
-persistent fig2 dhandle bhandle thandle nFit time_count ax1 htxt ...
+persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 htxt ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R;
 if isempty(fig2) || ~isvalid(fig2)
     fig2 = figure(nFig);
     fig2.UserData = struct('trialOffset', 0, 'doClear', false);
 
     ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
-    dhandle  = animatedline('Color','r','Marker','.','MarkerSize',20,'LineStyle','none','DisplayName','Psychometric function');
-
-    hold on
+    hold(ax1, 'on');
+    % scatter (not animatedline) so each dot's size can encode its trial count
+    dhandle  = scatter(ax1, nan, nan, 36, 'r', 'filled', 'DisplayName','Psychometric function');
     plot([0,0],[0,1],'--k');
     plot([-250,250],[0.5,0.5],'--k');
 
     nFit = animatedline('Color','r','LineStyle','-','LineWidth',2);
+
+    % Black-edged ring marking the most recently updated stimulus level
+    dlast = scatter(ax1, nan, nan, 36, 'r', 'filled', ...
+        'MarkerEdgeColor', [0 0 0], 'LineWidth', 2, 'DisplayName','Latest level');
 
     xlabel('Onset time delay(s)');
 
@@ -50,10 +54,12 @@ if isempty(fig2) || ~isvalid(fig2)
     box off
     bhandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Bias');
     title('Bias', 'FontSize', 15)
+    xlabel(ax2, 'Trial number');
     ax3 = subplot(4,2,6,'Parent',fig2);
     box off
     thandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Threshold');
     title('Treshold', 'FontSize', 15);
+    xlabel(ax3, 'Trial number');
 
     % RT vs asynchrony — leftward onset first (stimulus_dir < 0)
     ax_rtL = subplot(4,2,7,'Parent',fig2);
@@ -92,7 +98,7 @@ if fig2.UserData.doClear
     fig2.UserData.trialOffset = numel(trials);
     fig2.UserData.doClear     = false;
     time_count = 0;
-    clearpoints(dhandle); clearpoints(nFit);
+    set(dhandle,'XData',[],'YData',[]); set(dlast,'XData',[],'YData',[]); clearpoints(nFit);
     clearpoints(bhandle); clearpoints(thandle);
     clearpoints(rtdot_L); clearpoints(rtfit_L); rtxt_L.String = '';
     clearpoints(rtdot_R); clearpoints(rtfit_R); rtxt_R.String = '';
@@ -180,8 +186,19 @@ pRight = accumarray(idx, choiceLR==1, [], @mean);
 time_count = time_count + 1;
 
 %Update the plot
-clearpoints(dhandle);
-addpoints(dhandle, stim_levels ,pRight);
+% Marker size encodes trials-per-level: dots grow continuously from MIN_DOT
+% at 1 trial to MAX_DOT at CLIP_TRIALS trials (clipped above that).
+nPerLevel   = accumarray(idx, 1);     % # valid trials at each stimulus level
+MIN_DOT     = 15;                     % scatter area at 1 trial
+MAX_DOT     = 200;                    % scatter area at CLIP_TRIALS+ trials
+CLIP_TRIALS = 20;                     % trial count at which size saturates
+frac  = (min(nPerLevel, CLIP_TRIALS) - 1) / max(CLIP_TRIALS - 1, 1);
+dotSz = MIN_DOT + (MAX_DOT - MIN_DOT) * frac;
+set(dhandle, 'XData', stim_levels, 'YData', pRight, 'SizeData', dotSz);
+
+% Outline the level updated by the most recent trial (idx(end) = its level)
+iLast = idx(end);
+set(dlast, 'XData', stim_levels(iLast), 'YData', pRight(iLast), 'SizeData', dotSz(iLast));
 
 clearpoints( nFit);
 addpoints( nFit, xx ,yy);
@@ -192,8 +209,11 @@ htxt.String = sprintf('PSE = %.1f ms\nThresh = %.1f ms\nN = %d', pse, threshold,
 
 
 
-addpoints(bhandle, time_count , pse);
-addpoints(thandle, time_count , threshold);
+% x-axis = actual valid-trial count (TotalTrials), not the plot-update
+% counter time_count — the two diverge when >1 trial completes in one T2
+% tick, which made the Bias/Threshold x lag behind the displayed N.
+addpoints(bhandle, TotalTrials , pse);
+addpoints(thandle, TotalTrials , threshold);
 
 % --- RT vs asynchrony panels ---
 rtCol    = RT';       % n×1
