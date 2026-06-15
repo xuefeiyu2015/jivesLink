@@ -1,0 +1,5 @@
+# Jives export base path — copy this file to path.txt and edit the line below.
+# Put ONE absolute path on its own line. Lines starting with # are ignored.
+# comments_online/ and trials_online/ subfolders are created under this path.
+# Leave path.txt empty (or delete it) to fall back to MATLAB's current folder.
+/Users/you/Documents/JivesData

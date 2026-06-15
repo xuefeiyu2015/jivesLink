@@ -9,3 +9,6 @@ test/
 
 # macOS metadata
 .DS_Store
+
+# Machine-local export base path (use path.txt.example as template)
+path.txt
