@@ -228,9 +228,22 @@ end
 time_count = time_count + 1;
 
 %Update the plot
-% Marker size encodes trials-per-level (shared rule in trialCountDotSize)
+% Marker AREA is proportional to trials-per-condition, normalized to the
+% largest-count dot across ALL panels (shared rule in relDotSize). Compute
+% every panel's counts up front so they share one scale (gMaxN).
 nPerLevel = accumarray(idx, 1);       % # valid trials at each stimulus level
-dotSz     = trialCountDotSize(nPerLevel);
+
+% RT-panel decompositions (hoisted so they feed the shared dot scale)
+rtCol = RT'; hasRTcol = hasRT';
+inL = (stimulus_dir <= 0) & hasRTcol; fillL = inL & (choiceLR == 0); crossL = inL & (choiceLR == 1);
+inR = (stimulus_dir >= 0) & hasRTcol; fillR = inR & (choiceLR == 1); crossR = inR & (choiceLR == 0);
+[levFL, mrtFL, nFL] = rtByLevel(stimulus_dir, rtCol, fillL);
+[levXL, mrtXL, nXL] = rtByLevel(stimulus_dir, rtCol, crossL);
+[levFR, mrtFR, nFR] = rtByLevel(stimulus_dir, rtCol, fillR);
+[levXR, mrtXR, nXR] = rtByLevel(stimulus_dir, rtCol, crossR);
+gMaxN = max([nPerLevel(:); nFL(:); nXL(:); nFR(:); nXR(:); 1]);
+
+dotSz = relDotSize(nPerLevel, gMaxN);
 set(dhandle, 'XData', stim_levels, 'YData', pRight, 'SizeData', dotSz);
 
 % Outline the level updated by the most recent trial (idx(end) = its level)
@@ -260,8 +273,9 @@ if validFit
 end
 
 % --- RT vs asynchrony panels ---
-rtCol    = RT';       % n×1
-hasRTcol = hasRT';    % n×1
+% Decompositions (rtCol/hasRTcol, masks, per-level means/counts) were hoisted
+% above so all panels share one dot scale (gMaxN). relSize closes over gMaxN.
+relSize = @(nn) relDotSize(nn, gMaxN);
 
 % choiceLR: 1 = rightward choice, 0 = leftward choice
 % Each panel: choice MATCHING the onset-first side -> filled dots + fit;
@@ -269,17 +283,11 @@ hasRTcol = hasRT';    % n×1
 RT_FIT_MIN = 6;   % min trials in a choice group before its RT line is drawn
 
 % --- Leftward onset first (stimulus_dir <= 0) ---
-inL    = (stimulus_dir <= 0) & hasRTcol;
-fillL  = inL & (choiceLR == 0);    % leftward choice  -> filled dots + fit
-crossL = inL & (choiceLR == 1);    % rightward choice -> cross marker
-[levFL, mrtFL, nFL] = rtByLevel(stimulus_dir, rtCol, fillL);
-[levXL, mrtXL, nXL] = rtByLevel(stimulus_dir, rtCol, crossL);
-
 set(rtdot_L,'XData',[],'YData',[]); set(rtx_L,'XData',[],'YData',[]);
 set(rtlast_L,'XData',[],'YData',[]); clearpoints(rtfit_L); rtxt_L.String = '';
 
 if ~isempty(levFL)
-    set(rtdot_L,'XData',levFL,'YData',mrtFL,'SizeData',trialCountDotSize(nFL));
+    set(rtdot_L,'XData',levFL,'YData',mrtFL,'SizeData',relSize(nFL));
     if numel(levFL) >= 2 && sum(fillL) >= RT_FIT_MIN
         addpoints(rtfit_L, levFL, polyval(polyfit(levFL, mrtFL, 1), levFL));
         [rmatL, pmatL] = corrcoef(stimulus_dir(fillL), rtCol(fillL));
@@ -287,29 +295,23 @@ if ~isempty(levFL)
     end
 end
 if ~isempty(levXL)
-    set(rtx_L,'XData',levXL,'YData',mrtXL,'SizeData',crossDotSize(nXL));
+    set(rtx_L,'XData',levXL,'YData',mrtXL,'SizeData',relSize(nXL));
 end
 % encircle the most recent trial's point, on whichever group it belongs to
 if hasRTcol(end) && stimulus_dir(end) <= 0
     if choiceLR(end) == 0
-        ringRT(rtlast_L, levFL, mrtFL, nFL, stimulus_dir(end), @trialCountDotSize);
+        ringRT(rtlast_L, levFL, mrtFL, nFL, stimulus_dir(end), relSize);
     else
-        ringRT(rtlast_L, levXL, mrtXL, nXL, stimulus_dir(end), @crossDotSize);
+        ringRT(rtlast_L, levXL, mrtXL, nXL, stimulus_dir(end), relSize);
     end
 end
 
 % --- Rightward onset first (stimulus_dir >= 0) ---
-inR    = (stimulus_dir >= 0) & hasRTcol;
-fillR  = inR & (choiceLR == 1);    % rightward choice -> filled dots + fit
-crossR = inR & (choiceLR == 0);    % leftward choice  -> cross marker
-[levFR, mrtFR, nFR] = rtByLevel(stimulus_dir, rtCol, fillR);
-[levXR, mrtXR, nXR] = rtByLevel(stimulus_dir, rtCol, crossR);
-
 set(rtdot_R,'XData',[],'YData',[]); set(rtx_R,'XData',[],'YData',[]);
 set(rtlast_R,'XData',[],'YData',[]); clearpoints(rtfit_R); rtxt_R.String = '';
 
 if ~isempty(levFR)
-    set(rtdot_R,'XData',levFR,'YData',mrtFR,'SizeData',trialCountDotSize(nFR));
+    set(rtdot_R,'XData',levFR,'YData',mrtFR,'SizeData',relSize(nFR));
     if numel(levFR) >= 2 && sum(fillR) >= RT_FIT_MIN
         addpoints(rtfit_R, levFR, polyval(polyfit(levFR, mrtFR, 1), levFR));
         [rmatR, pmatR] = corrcoef(stimulus_dir(fillR), rtCol(fillR));
@@ -317,13 +319,13 @@ if ~isempty(levFR)
     end
 end
 if ~isempty(levXR)
-    set(rtx_R,'XData',levXR,'YData',mrtXR,'SizeData',crossDotSize(nXR));
+    set(rtx_R,'XData',levXR,'YData',mrtXR,'SizeData',relSize(nXR));
 end
 if hasRTcol(end) && stimulus_dir(end) >= 0
     if choiceLR(end) == 1
-        ringRT(rtlast_R, levFR, mrtFR, nFR, stimulus_dir(end), @trialCountDotSize);
+        ringRT(rtlast_R, levFR, mrtFR, nFR, stimulus_dir(end), relSize);
     else
-        ringRT(rtlast_R, levXR, mrtXR, nXR, stimulus_dir(end), @crossDotSize);
+        ringRT(rtlast_R, levXR, mrtXR, nXR, stimulus_dir(end), relSize);
     end
 end
 
@@ -342,15 +344,14 @@ function clearPsychData(fig)
     end
 end
 
-function sz = trialCountDotSize(n)
-% Scatter marker area scaling continuously from MIN_DOT at 1 trial to
-% MAX_DOT at CLIP_TRIALS trials (clipped above that). Shared by the
-% psychometric and the RT-vs-asynchrony panels.
-MIN_DOT     = 15;                      % scatter area at 1 trial
-MAX_DOT     = 200;                     % scatter area at CLIP_TRIALS+ trials
-CLIP_TRIALS = 20;                      % trial count at which size saturates
-frac = (min(n(:), CLIP_TRIALS) - 1) / max(CLIP_TRIALS - 1, 1);
-sz   = MIN_DOT + (MAX_DOT - MIN_DOT) * frac;
+function sz = relDotSize(n, maxN)
+% Scatter marker AREA proportional to trial count, normalized so the dot with
+% the most trials (maxN, shared across all panels) is drawn at MAX_DOT. Strictly
+% proportional: a 3-trial dot has 3x the area of a 1-trial dot. No floor/plateau.
+MAX_DOT = 300;                 % area of the largest-count dot (tunable)
+if isempty(n); sz = []; return; end
+if maxN < 1; maxN = 1; end
+sz = MAX_DOT * (n(:) / maxN);
 end
 
 function [lev, mrt, n] = rtByLevel(stim, rt, mask)
@@ -365,13 +366,6 @@ mrt = accumarray(ix, r, [], @mean);
 n   = accumarray(ix, 1);
 end
 
-function sz = crossDotSize(n)
-% Cross markers get a higher floor than filled dots so a single-trial
-% cross stays clearly visible.
-MIN_CROSS = 60;
-sz = max(trialCountDotSize(n), MIN_CROSS);
-end
-
 function s = ringSize(markerArea)
 % Hollow ring area that encircles (sits outside) a marker of markerArea.
 s = markerArea*2 + 40;
@@ -379,7 +373,7 @@ end
 
 function ringRT(h, lev, mrt, n, x, sizeFcn)
 % Position the hollow latest-trial ring h at asynchrony level x (if present),
-% sized to encircle a marker drawn with sizeFcn (trialCountDotSize/crossDotSize).
+% sized to encircle a marker drawn with sizeFcn (the relSize handle over relDotSize).
 i = find(lev == x, 1);
 if ~isempty(i)
     set(h, 'XData', lev(i), 'YData', mrt(i), 'SizeData', ringSize(sizeFcn(n(i))));
