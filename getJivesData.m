@@ -10,7 +10,7 @@ function getJivesData()
 % Trial parsing is adapted from doc/CommentTrialStructure.m.
 % Called by jivesBROnline.m — do not call directly.
 
-global inTrial trials  % REVISED: added trials
+global inTrial trials fhComments fhTrials
 persistent localData spikeBuf   % spikeBuf: rolling per-(ch,unit) spike-timestamp cell
 
 dbstop if error
@@ -54,6 +54,14 @@ if ~isempty(spikedata)
     end
 end
 [cmts, ts, ~, ~] = cbmex('trialcomment', 1);  % flush comment buffer
+
+% Stream raw comments to log file
+if ~isempty(fhComments) && fhComments > 0 && ~isempty(cmts)
+    for k = 1:numel(cmts)
+        fprintf(fhComments, '%.6f\t%s\n', ts(k), cmts{k});
+    end
+end
+
 %{
 if isempty(cmts); return; end
 A=table(cmts);
@@ -212,6 +220,29 @@ for i = 1:numel(cmts)
             %}
             trials(end+1) = localData;
         end
+
+        % Stream completed trial to CSV log file
+        if ~isempty(fhTrials) && fhTrials > 0
+            fprintf(fhTrials, '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n', ...
+                fmtVal(localData.Trial_number), ...
+                fmtVal(localData.Task), ...
+                fmtVal(localData.Trial_type), ...
+                fmtVal(localData.Start), ...
+                fmtVal(localData.End), ...
+                fmtVal(localData.Trialoutcome), ...
+                fmtVal(localData.Choiceoutcome), ...
+                fmtVal(localData.Choosen_choice), ...
+                fmtVal(localData.Choicetime), ...
+                fmtVal(localData.Target_1_presented), ...
+                fmtVal(localData.Target_2_presented), ...
+                fmtVal(localData.Target_1_position(1)), ...
+                fmtVal(localData.Target_1_position(2)), ...
+                fmtVal(localData.Target_2_position(1)), ...
+                fmtVal(localData.Target_2_position(2)), ...
+                fmtVal(localData.Requested_target_2_time_offset), ...
+                fmtVal(localData.Fixation_point_off));
+        end
+
         %
         fprintf('Trial %3d  outcome: %-12s  choice: %s\n', ...
             trl_num, num2str(localData.Trialoutcome), num2str(localData.Choosen_choice));
@@ -226,4 +257,19 @@ catch
     keyboard
 end
 %}
+end
+
+function s = fmtVal(v)
+% Convert a struct field value (numeric scalar or string) to a CSV token.
+if ischar(v) || isstring(v)
+    s = char(v);
+elseif isnumeric(v) && isscalar(v) && ~isnan(v)
+    if v == floor(v) && abs(v) < 1e9
+        s = sprintf('%d', v);
+    else
+        s = sprintf('%.6f', v);
+    end
+else
+    s = '';
+end
 end
