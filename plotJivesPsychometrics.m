@@ -131,9 +131,13 @@ else
 end
 if isempty(tAll) || numel(tAll) < 2; return; end
 
-% --- Trials with a valid choice ---
-valid  = ~isnan([tAll.Choosen_choice]);
-if valid(end)==0
+% --- Trials with a valid choice AND from the time-discrimination task ---
+% Mirror the switchyard's dispatch predicate (contains(Task,'time')) so the
+% psychometric never mixes in trials from other tasks (e.g. visual saccade),
+% whose Requested_target_2_time_offset is NaN and would pollute the fit.
+isTimeTask = arrayfun(@(t) contains(t.Task, 'time'), tAll);
+valid      = ~isnan([tAll.Choosen_choice]) & isTimeTask;
+if isempty(valid) || valid(end)==0
     return
 end
 
