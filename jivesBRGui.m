@@ -138,9 +138,10 @@ function onStart(fig, hStart, hStatus)
 
     % Open streaming log files for this session (conditional on checkboxes)
     dtStr      = datestr(now, 'yyyymmdd_HHMMSS');
+    dateStr    = datestr(now, 'yyyy-mm-dd');   % date subfolder name
     exportPath = fig.UserData.hExportPath.Value;
     if fig.UserData.chkComments.Value
-        commentsDir = fullfile(exportPath, 'comments_online');
+        commentsDir = fullfile(exportPath, 'comments_online', dateStr);
         if ~isfolder(commentsDir); mkdir(commentsDir); end
         commentFile = fullfile(commentsDir, ['comments_' dtStr '.txt']);
         fhComments  = fopen(commentFile, 'w');
@@ -149,7 +150,7 @@ function onStart(fig, hStart, hStatus)
         fhComments = [];
     end
     if fig.UserData.chkTrials.Value
-        trialsDir = fullfile(exportPath, 'trials_online');
+        trialsDir = fullfile(exportPath, 'trials_online', dateStr);
         if ~isfolder(trialsDir); mkdir(trialsDir); end
         trialFile = fullfile(trialsDir, ['trials_' dtStr '.csv']);
         fhTrials  = fopen(trialFile, 'w');
