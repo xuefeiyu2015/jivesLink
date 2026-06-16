@@ -158,7 +158,7 @@ direction = sign(T1ang); %1: right first, -1: left first
 
 % Reaction time (ms)
 hasRT = ~isnan([tValid.Choicetime]) & ~isnan([tValid.Fixation_point_off]);
-RT    = ([tValid.Choicetime] - [tValid.Fixation_point_off])/1000; % in s
+RT    = ([tValid.Choicetime] - [tValid.Fixation_exited])/1000; % in s
 
 %Proportion of rightward choices
 choiceLR = chooseN;
