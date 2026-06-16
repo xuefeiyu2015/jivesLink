@@ -12,3 +12,7 @@ test/
 
 # Machine-local export base path (use path.txt.example as template)
 path.txt
+
+#data
+*.csv
+*.txt

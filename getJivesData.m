@@ -33,6 +33,7 @@ TEMPLATE = struct( ...
     'Target_2_position',  [NaN NaN],  ...  % [x, y] deg
     'Requested_target_2_time_offset', NaN,...  %time onset offset for time delay task
     'Fixation_point_off', NaN,... %time of fixation point of i.e. go cue
+    'Fixation_exited', NaN,... %time of eyes exit the fixation window
     'spike_times', {{}}...        % {nCh x nUnitCols} cell of absolute spike timestamps within [Start, End]
 );
 
@@ -184,6 +185,12 @@ for i = 1:numel(cmts)
     elseif contains(event_text,'Fixation point off','IgnoreCase',true)
         if isnan(localData.Fixation_point_off)
             localData.Fixation_point_off = t;
+        end
+
+    %For exiting fixation window
+    elseif contains(event_text,'Fixation exited','IgnoreCase',true)
+        if isnan(localData.Fixation_exited)
+            localData.Fixation_exited = t;
         end
 
     % --- Trial end: "End - Correct", "End - Time out", etc. ---
