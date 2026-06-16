@@ -51,11 +51,17 @@ uibutton(fig, 'push', ...
 %% Export section
 uilabel(fig, 'Position', [20 122 320 20], ...
     'Text', 'Export Data', 'FontWeight', 'bold');
+% Base export path comes from path.txt (next to this GUI); fall back to pwd.
+basePath = readBasePathFile();        % '' if path.txt missing/empty
+useDefaultPath = isempty(basePath);
+if useDefaultPath
+    basePath = pwd;
+end
 uilabel(fig, 'Position', [20 96 42 20], 'Text', 'Path:');
 hExportPath = uieditfield(fig, 'text', ...
     'Position', [65 94 200 22], ...
-    'Value',    pwd, ...
-    'Tooltip',  'Directory where log files are saved');
+    'Value',    basePath, ...
+    'Tooltip',  'Base directory; comments_online/ and trials_online/ are created here');
 uibutton(fig, 'push', ...
     'Position',       [270 94 70 22], ...
     'Text',           'Browse...', ...
@@ -78,6 +84,13 @@ T_ui = timer('Name', 'Jives_UI', 'Period', 0.5, 'ExecutionMode', 'fixedRate', ..
              'TimerFcn', @(~,~) updateLabels(fig, hStatus, hTrials, hTask));
 fig.UserData.T_ui = T_ui;
 start(T_ui);
+
+% Notify the user if path.txt was empty/missing and we fell back to pwd.
+if useDefaultPath
+    uialert(fig, sprintf(['path.txt is empty or missing — using the current folder:\n%s\n\n' ...
+        'Set your own base path in path.txt (next to jivesBRGui.m) to share across systems.'], ...
+        basePath), 'Using default path', 'Icon', 'info');
+end
 
 end % jivesBRGui
 
@@ -127,14 +140,18 @@ function onStart(fig, hStart, hStatus)
     dtStr      = datestr(now, 'yyyymmdd_HHMMSS');
     exportPath = fig.UserData.hExportPath.Value;
     if fig.UserData.chkComments.Value
-        commentFile = fullfile(exportPath, ['comments_' dtStr '.txt']);
+        commentsDir = fullfile(exportPath, 'comments_online');
+        if ~isfolder(commentsDir); mkdir(commentsDir); end
+        commentFile = fullfile(commentsDir, ['comments_' dtStr '.txt']);
         fhComments  = fopen(commentFile, 'w');
         fprintf('[Export] comments → %s\n', commentFile);
     else
         fhComments = [];
     end
     if fig.UserData.chkTrials.Value
-        trialFile = fullfile(exportPath, ['trials_' dtStr '.csv']);
+        trialsDir = fullfile(exportPath, 'trials_online');
+        if ~isfolder(trialsDir); mkdir(trialsDir); end
+        trialFile = fullfile(trialsDir, ['trials_' dtStr '.csv']);
         fhTrials  = fopen(trialFile, 'w');
         fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_point_off\n');
         fprintf('[Export] trials   → %s\n', trialFile);
@@ -286,4 +303,20 @@ function onBrowse(fig)
     if folder ~= 0
         fig.UserData.hExportPath.Value = folder;
     end
+end
+
+%% =========================================================================
+
+function bp = readBasePathFile()
+% Read the base export path from path.txt located next to this GUI file.
+% Returns the first non-empty, non-comment (#) line trimmed, or '' if none.
+    bp = '';
+    thisDir  = fileparts(mfilename('fullpath'));
+    pathFile = fullfile(thisDir, 'path.txt');
+    if ~isfile(pathFile); return; end
+    lines = strsplit(fileread(pathFile), {'\r\n', '\n', '\r'});
+    lines = strtrim(lines);
+    lines = lines(~cellfun(@isempty, lines));    % drop blank lines
+    lines = lines(~startsWith(lines, '#'));      % drop comment lines
+    if ~isempty(lines); bp = lines{1}; end
 end
