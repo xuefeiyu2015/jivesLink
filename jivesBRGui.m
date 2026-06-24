@@ -162,6 +162,7 @@ function onStart(fig, hStart, hStatus)
 
     % Connect cbmex
     try
+       
         cbmex('open')
         cbmex('trialconfig', 1, 'double', 'absolute', 'comment', 200)
     catch ME

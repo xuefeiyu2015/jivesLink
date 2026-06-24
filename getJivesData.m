@@ -39,6 +39,8 @@ TEMPLATE = struct( ...
 
 % Flush both buffers every tick
 spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear
+% first need to find out all channels start with chan**
+% first column is the channel name
 % --- accumulate sorted-unit spikes into rolling buffer (cols 1-2 = unsorted/hash, skip) ---
 if ~isempty(spikedata)
     [nCh, nU] = size(spikedata);
@@ -46,7 +48,7 @@ if ~isempty(spikedata)
         spikeBuf = cell(nCh, nU);
     end
     for c = 1:nCh
-        for u = 3:nU
+        for u = 2:nU
             ts_new = spikedata{c, u};
             if ~isempty(ts_new)
                 spikeBuf{c, u} = [spikeBuf{c, u}; ts_new(:)];
@@ -59,9 +61,11 @@ end
 % Stream raw comments to log file
 if ~isempty(fhComments) && fhComments > 0 && ~isempty(cmts)
     for k = 1:numel(cmts)
-        fprintf(fhComments, '%.6f\t%s\n', ts(k), cmts{k});
+        fprintf(fhComments, '%.6f\t%s\n', ts(k), cmts{k}(1:92));
     end
 end
+
+%Strean raw spike for channel 1 
 
 %{
 if isempty(cmts); return; end
@@ -247,6 +251,7 @@ for i = 1:numel(cmts)
                 fmtVal(localData.Target_2_position(1)), ...
                 fmtVal(localData.Target_2_position(2)), ...
                 fmtVal(localData.Requested_target_2_time_offset), ...
+                fmtVal(localData.Fixation_exited), ...
                 fmtVal(localData.Fixation_point_off));
         end
 
