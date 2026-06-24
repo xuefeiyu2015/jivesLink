@@ -132,7 +132,7 @@ function onStart(fig, hStart, hStatus)
     end
 
     % Reset globals
-    global trials inTrial fhComments fhTrials
+    global trials inTrial fhComments fhTrials fhSpikes
     trials  = struct([]);
     inTrial = false;
 
@@ -146,8 +146,13 @@ function onStart(fig, hStart, hStatus)
         commentFile = fullfile(commentsDir, ['comments_' dtStr '.txt']);
         fhComments  = fopen(commentFile, 'w');
         fprintf('[Export] comments → %s\n', commentFile);
+        % Channel-1 unit-1/unit-2 spike timings — same folder as comments
+        spikeFile = fullfile(commentsDir, ['spikes_ch1_' dtStr '.txt']);
+        fhSpikes  = fopen(spikeFile, 'w');
+        fprintf('[Export] spikes   → %s\n', spikeFile);
     else
         fhComments = [];
+        fhSpikes   = [];
     end
     if fig.UserData.chkTrials.Value
         trialsDir = fullfile(exportPath, 'trials_online', dateStr);
@@ -207,9 +212,10 @@ function onCloseAll(fig, hStatus)
     try; cbmex('close');          catch; end
 
     % Close log file handles before clearing globals
-    global fhComments fhTrials
+    global fhComments fhTrials fhSpikes
     if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
     if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
+    if ~isempty(fhSpikes)   && fhSpikes   > 0; fclose(fhSpikes);   fhSpikes   = []; end
 
     % Clear globals
     global trials inTrial
@@ -254,9 +260,10 @@ function onCloseWindow(fig)
         stopTimers(ud);
         try; cbmex('trialconfig', 0); catch; end
         try; cbmex('close');          catch; end
-        global fhComments fhTrials
+        global fhComments fhTrials fhSpikes
         if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
         if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
+        if ~isempty(fhSpikes)   && fhSpikes   > 0; fclose(fhSpikes);   fhSpikes   = []; end
     end
     delete(fig);
 end

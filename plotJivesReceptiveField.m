@@ -226,12 +226,12 @@ if isfield(trials(end), 'spike_times') && ~isempty(trials(end).spike_times)
         chSel        = hChDD.Value;
         lastNCh      = nCh;
     end
-    nSortedUnits = max(0, size(trials(end).spike_times, 2) - 2);
-    if isempty(lastNUnits) || lastNUnits ~= nSortedUnits
-        unitStrs = [arrayfun(@num2str, 1:nSortedUnits, 'uni', 0), {'all'}];
+    nUnits = max(0, size(trials(end).spike_times, 2));   % every col is a unit (col 1 = unsorted, col 2+ = sorted)
+    if isempty(lastNUnits) || lastNUnits ~= nUnits
+        unitStrs = [arrayfun(@num2str, 1:nUnits, 'uni', 0), {'all'}];
         hUnitDD.String = unitStrs;
         hUnitDD.Value  = min(hUnitDD.Value, numel(unitStrs));
-        lastNUnits = nSortedUnits;
+        lastNUnits = nUnits;
     end
 end
 
@@ -345,14 +345,14 @@ for n = loopStart : nTrials
     % Build single merged spike vector for this trial
     if unitSel == -1
         allSpks = [];
-        for u = 3 : size(sp, 2)
+        for u = 1 : size(sp, 2)
             if ~isempty(sp{chSel, u})
                 allSpks = [allSpks; sp{chSel, u}(:)]; %#ok<AGROW>
             end
         end
         allSpks = sort(allSpks);
     else
-        u = 2 + unitSel;
+        u = unitSel;
         if u <= size(sp, 2) && ~isempty(sp{chSel, u})
             allSpks = sp{chSel, u}(:);
         else
