@@ -39,13 +39,13 @@ TEMPLATE = struct( ...
 
 % Flush both buffers every tick
 spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear
-% Keep only spike channels (rows named "Chan**") and drop the channel-name
-% column, so every remaining column is unit spike data (col 1 = unsorted,
-% col 2+ = sorted). Requires >=2 columns (name + at least one unit); else
-% there are no spikes this tick.
+% Keep only spike channels (rows whose name contains "chan", e.g.
+% "Hub1-chan1") and drop the channel-name column, so every remaining column
+% is unit spike data (col 1 = unsorted, col 2+ = sorted). Requires >=2
+% columns (name + at least one unit); else there are no spikes this tick.
 if ~isempty(spikedata) && size(spikedata, 2) >= 2
     isSpikeCh = cellfun(@(nm) (ischar(nm) || isstring(nm)) && ...
-                              startsWith(string(nm), "chan", 'IgnoreCase', true), ...
+                              contains(string(nm), "chan", 'IgnoreCase', true), ...
                         spikedata(:,1));
     spikedata = spikedata(isSpikeCh, 2:end);   % drop name col; keep unit-timestamp cols
 else
