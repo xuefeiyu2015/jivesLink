@@ -10,7 +10,7 @@ function getJivesData()
 % Trial parsing is adapted from doc/CommentTrialStructure.m.
 % Called by jivesBROnline.m — do not call directly.
 
-global inTrial trials fhComments fhTrials
+global inTrial trials fhComments fhTrials fhSpikes
 persistent localData spikeBuf   % spikeBuf: rolling per-(ch,unit) spike-timestamp cell
 
 dbstop if error
@@ -39,14 +39,26 @@ TEMPLATE = struct( ...
 
 % Flush both buffers every tick
 spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear
-% --- accumulate sorted-unit spikes into rolling buffer (cols 1-2 = unsorted/hash, skip) ---
+% Keep only spike channels (rows whose name contains "chan", e.g.
+% "Hub1-chan1") and drop the channel-name column, so every remaining column
+% is unit spike data (col 1 = unsorted, col 2+ = sorted). Requires >=2
+% columns (name + at least one unit); else there are no spikes this tick.
+if ~isempty(spikedata) && size(spikedata, 2) >= 2
+    isSpikeCh = cellfun(@(nm) (ischar(nm) || isstring(nm)) && ...
+                              contains(string(nm), "chan", 'IgnoreCase', true), ...
+                        spikedata(:,1));
+    spikedata = spikedata(isSpikeCh, 2:end);   % drop name col; keep unit-timestamp cols
+else
+    spikedata = {};                            % no spike-unit columns this tick
+end
+% --- accumulate unit spikes into rolling buffer (all cols are units: col 1 = unsorted, col 2+ = sorted) ---
 if ~isempty(spikedata)
     [nCh, nU] = size(spikedata);
     if isempty(spikeBuf) || ~isequal(size(spikeBuf), [nCh nU])
         spikeBuf = cell(nCh, nU);
     end
     for c = 1:nCh
-        for u = 3:nU
+        for u = 1:nU
             ts_new = spikedata{c, u};
             if ~isempty(ts_new)
                 spikeBuf{c, u} = [spikeBuf{c, u}; ts_new(:)];
@@ -59,7 +71,19 @@ end
 % Stream raw comments to log file
 if ~isempty(fhComments) && fhComments > 0 && ~isempty(cmts)
     for k = 1:numel(cmts)
-        fprintf(fhComments, '%.6f\t%s\n', ts(k), cmts{k});
+        fprintf(fhComments, '%.6f\t%s\n', ts(k), cmts{k}(1:92));
+    end
+end
+
+% Stream channel-1 unit-1 / unit-2 spike timestamps to log, as they arrive.
+% Format: one spike per line "<timestamp_s>\t<unit>". spikedata rows are
+% spike channels, cols are units (col 1 = unit 1 = unsorted, col 2 = unit 2).
+if ~isempty(fhSpikes) && fhSpikes > 0 && ~isempty(spikedata) && size(spikedata,1) >= 1
+    for u = 1:min(2, size(spikedata,2))
+        tsu = spikedata{1, u}(:);
+        if ~isempty(tsu)
+            fprintf(fhSpikes, '%.6f\t%d\n', [tsu, repmat(u, numel(tsu), 1)].');
+        end
     end
 end
 
@@ -204,7 +228,7 @@ for i = 1:numel(cmts)
         if ~isempty(spikeBuf)
             localData.spike_times = cell(size(spikeBuf));
             for c = 1:size(spikeBuf,1)
-                for u = 3:size(spikeBuf,2)
+                for u = 1:size(spikeBuf,2)
                     ts_all = spikeBuf{c, u};
                     if ~isempty(ts_all)
                         mask = ts_all >= localData.Start & ts_all <= localData.End;
@@ -247,6 +271,7 @@ for i = 1:numel(cmts)
                 fmtVal(localData.Target_2_position(1)), ...
                 fmtVal(localData.Target_2_position(2)), ...
                 fmtVal(localData.Requested_target_2_time_offset), ...
+                fmtVal(localData.Fixation_exited), ...
                 fmtVal(localData.Fixation_point_off));
         end
 
