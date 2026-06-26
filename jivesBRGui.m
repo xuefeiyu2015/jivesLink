@@ -74,10 +74,15 @@ chkTrials = uicheckbox(fig, ...
     'Position', [200 62 150 22], ...
     'Text',     'Export trials (.csv)', ...
     'Value',    true);
+chkSpikes = uicheckbox(fig, ...
+    'Position', [20 36 320 22], ...
+    'Text',     'Export spike time sample (.txt) — debug only', ...
+    'Value',    false);
 
 fig.UserData.hExportPath = hExportPath;
 fig.UserData.chkComments = chkComments;
 fig.UserData.chkTrials   = chkTrials;
+fig.UserData.chkSpikes   = chkSpikes;
 
 %% UI update timer — refreshes status, trial count, and task label every 0.5 s
 T_ui = timer('Name', 'Jives_UI', 'Period', 0.5, 'ExecutionMode', 'fixedRate', ...
@@ -146,13 +151,18 @@ function onStart(fig, hStart, hStatus)
         commentFile = fullfile(commentsDir, ['comments_' dtStr '.txt']);
         fhComments  = fopen(commentFile, 'w');
         fprintf('[Export] comments → %s\n', commentFile);
-        % Channel-1 unit-1/unit-2 spike timings — same folder as comments
-        spikeFile = fullfile(commentsDir, ['spikes_ch1_' dtStr '.txt']);
+    else
+        fhComments = [];
+    end
+    % Channel-1 unit-1/unit-2 spike timings (debug only; opt-in checkbox).
+    if fig.UserData.chkSpikes.Value
+        spikesDir = fullfile(exportPath, 'comments_online', dateStr);
+        if ~isfolder(spikesDir); mkdir(spikesDir); end
+        spikeFile = fullfile(spikesDir, ['spikes_ch1_' dtStr '.txt']);
         fhSpikes  = fopen(spikeFile, 'w');
         fprintf('[Export] spikes   → %s\n', spikeFile);
     else
-        fhComments = [];
-        fhSpikes   = [];
+        fhSpikes = [];
     end
     if fig.UserData.chkTrials.Value
         trialsDir = fullfile(exportPath, 'trials_online', dateStr);
