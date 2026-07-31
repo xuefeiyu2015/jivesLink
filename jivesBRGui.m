@@ -199,7 +199,10 @@ function onStart(fig, hStart, hStatus)
         if ~isfolder(trialsDir); mkdir(trialsDir); end
         trialFile = fullfile(trialsDir, ['trials_' dtStr '.csv']);
         fhTrials  = fopen(trialFile, 'w');
-        fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_point_off\n');
+        % 18 columns — must match the fprintf in getJivesData exactly. The
+        % header previously omitted Fixation_exited, so the column labelled
+        % Fixation_point_off actually carried Fixation_exited.
+        fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_exited,Fixation_point_off\n');
         fprintf('[Export] trials   → %s\n', trialFile);
     else
         fhTrials = [];
@@ -207,12 +210,18 @@ function onStart(fig, hStart, hStatus)
 
     % REVISED: T1 calls getJivesData with no output — completed trials are
     % appended directly to global `trials` inside getJivesData.
-    T1 = timer('Name', 'Jives_Acquire', 'Period', 0.25, 'ExecutionMode', 'fixedRate', ...
+    % ExecutionMode is 'fixedSpacing', NOT 'fixedRate'. Under fixedRate a
+    % callback that overruns its period leaves MATLAB queueing the missed
+    % executions cumulatively, so the timer never goes idle again — that is
+    % exactly the saturation described in shutdownPipeline below, and it is
+    % what made Close All hang. fixedSpacing waits Period AFTER the callback
+    % returns, so an overrun self-limits instead of compounding.
+    T1 = timer('Name', 'Jives_Acquire', 'Period', 0.25, 'ExecutionMode', 'fixedSpacing', ...
                'TimerFcn', 'getJivesData();', ...            % REVISED
                'ErrorFcn', @(~,e) fprintf('[T1 error] %s\n', e.Data.message));
 
     % REVISED: T2 switchyard takes no argument — reads global `trials` directly.
-    T2 = timer('Name', 'Jives_Plot', 'Period', 1.0, 'ExecutionMode', 'fixedRate', ...
+    T2 = timer('Name', 'Jives_Plot', 'Period', 1.0, 'ExecutionMode', 'fixedSpacing', ...
                'TimerFcn', 'jivesAnalysisSwitchyard();', ... % REVISED
                'ErrorFcn', @(~,e) fprintf('[T2 error] %s\n', e.Data.message));
 
@@ -343,9 +352,16 @@ function shutdownPipeline(fig, hStatus, restoreUI)
 
     % 7. Clear globals
     tC = tic;
-    global trials inTrial
-    trials  = struct([]);
-    inTrial = false;
+    % `trials` and its companions must be cleared together — the plots rely on
+    % tsum.n == numel(trials) == numel(spikeTrials), and leaving any of them
+    % populated would carry data into the next session.
+    global trials inTrial spikeTrials tsum spikeNCh spikeNUnits
+    trials      = struct([]);
+    inTrial     = false;
+    spikeTrials = [];
+    tsum        = [];
+    spikeNCh    = [];
+    spikeNUnits = [];
 
     % 8. Clear persistent variables in all pipeline functions. Safe here
     %    because none of these functions is on the call stack any more.

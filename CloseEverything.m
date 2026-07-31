@@ -3,11 +3,16 @@
 % Stops and deletes the acquisition timers, closes cbmex, and closes the
 % streaming log files.
 %
+% Session data (`trials`, `spikeTrials`, `tsum`) is deliberately LEFT INTACT
+% so it can be inspected after closing. jivesBROnline.m does `clear global`
+% on start-up, so the next session begins clean regardless.
+%
 % NOTE: delete() on a timer whose TimerFcn is still executing BLOCKS
-% indefinitely. T1 is a 0.25 s fixedRate timer, and its callback can exceed
-% 0.25 s late in a session — at which point it saturates and never goes idle.
-% So: stop first, drain with a hard time bound, and only delete timers that
-% have actually gone idle.
+% indefinitely. T1 has a 0.25 s period and its callback can exceed that late
+% in a session. (It now runs in 'fixedSpacing' mode, so an overrun no longer
+% queues missed executions cumulatively, but a single in-flight callback can
+% still be mid-execution here.) So: stop first, drain with a hard time bound,
+% and only delete timers that have actually gone idle.
 
 DRAIN_LIMIT = 3;   % seconds
 

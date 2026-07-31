@@ -50,4 +50,10 @@ elseif contains(task_type, 'time')
 else
         fprintf('[Switchyard] Unknown task type: "%s"\n', task_type);
 end
-%}
+
+% Single renderer flush for the whole tick. The plot functions used to call
+% drawnow individually, so one T2 tick triggered three separate full flushes;
+% batching them here lets the renderer coalesce every pending invalidation
+% into one frame. `limitrate` also avoids draining the event queue, which
+% could otherwise let the 0.25 s T1 callback re-enter mid-plot.
+drawnow limitrate

@@ -9,16 +9,20 @@ function plotJivesPsychometrics(nFig)
 %   3. Overall choice proportions     6. Trial outcome breakdown
 %
 % Called by jivesBROnline.m — do not call directly.
+% Does NOT call drawnow — the switchyard issues a single flush per tick.
+%
+% Reads the numeric mirror `tsum` (built once per trial in getJivesData)
+% rather than rescanning the `trials` struct array on every tick.
 
-global trials
+global tsum
 
-if isempty(trials) || numel(trials) < 2; return; end
+if isempty(tsum) || tsum.n < 2; return; end
 
 %try
  %initialization
 persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 htxt ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R ...
-           rtlast_L rtlast_R rtx_L rtx_R;
+           rtlast_L rtlast_R rtx_L rtx_R pPrev optz;
 if isempty(fig2) || ~isvalid(fig2)
     fig2 = figure(nFig);
     fig2.UserData = struct('trialOffset', 0, 'doClear', false);
@@ -106,59 +110,60 @@ end
 
 % --- Handle clear request (set by button callback on previous tick) ---
 if fig2.UserData.doClear
-    fig2.UserData.trialOffset = numel(trials);
+    fig2.UserData.trialOffset = tsum.n;
     fig2.UserData.doClear     = false;
     time_count = 0;
-    set(dhandle,'XData',[],'YData',[]); set(dlast,'XData',[],'YData',[]); clearpoints(nFit);
+    pPrev      = [];      % drop the warm-start seed with the data it came from
+    blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
     clearpoints(bhandle); clearpoints(thandle);
-    set(rtdot_L,'XData',[],'YData',[]); set(rtx_L,'XData',[],'YData',[]); set(rtlast_L,'XData',[],'YData',[]); clearpoints(rtfit_L); rtxt_L.String = '';
-    set(rtdot_R,'XData',[],'YData',[]); set(rtx_R,'XData',[],'YData',[]); set(rtlast_R,'XData',[],'YData',[]); clearpoints(rtfit_R); rtxt_R.String = '';
+    blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
+    blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
     htxt.String = '';
     drawnow;
     return;
 end
 
 % --- Apply trial offset (set by Clear button) ---
+% Indexes the numeric mirror `tsum`, which getJivesData appends in lockstep
+% with `trials`, so the Clear-button offset semantics are unchanged.
 offset = fig2.UserData.trialOffset;
-if offset > 0 && offset + 1 <= numel(trials)
-    tAll = trials(offset+1:end);
+if offset > 0 && offset + 1 <= tsum.n
+    i0 = offset + 1;
 else
-    if offset >= numel(trials)
+    if offset >= tsum.n
         disp('plotJivesPsychometrics: trials refreshed externally — using full trials array');
         fig2.UserData.trialOffset = 0;
     end
-    tAll = trials;
+    i0 = 1;
 end
-if isempty(tAll) || numel(tAll) < 2; return; end
+if tsum.n - i0 + 1 < 2; return; end
 
 % --- Trials with a valid choice AND from the time-discrimination task ---
 % Mirror the switchyard's dispatch predicate (contains(Task,'time')) so the
 % psychometric never mixes in trials from other tasks (e.g. visual saccade),
 % whose Requested_target_2_time_offset is NaN and would pollute the fit.
-isTimeTask = arrayfun(@(t) contains(t.Task, 'time'), tAll);
-valid      = ~isnan([tAll.Choosen_choice]) & isTimeTask;
+% isTimeTask was evaluated once per trial in getJivesData using the identical
+% expression, replacing a per-tick arrayfun over the whole struct array.
+sel   = i0 : tsum.n;
+valid = ~isnan(tsum.choice(sel)) & tsum.isTimeTask(sel);
 if isempty(valid) || valid(end)==0
     return
 end
 
-tValid = tAll(valid);
-if numel(tValid) < 1; return; end
+vIdx = sel(valid);
+if isempty(vIdx); return; end
 
 % Numeric choice (1 or 2)
-chooseN = [tValid.Choosen_choice]';% 1 or 2
+chooseN = tsum.choice(vIdx);% 1 or 2
 
-% Target angles: right = positive, left = negative
-T1xy = vertcat(tValid.Target_1_position);
-%T2xy = vertcat(tValid.Target_2_position);
-[th1, ~] = cart2pol(T1xy(:,1), T1xy(:,2));
-T1ang = mod(90 - rad2deg(th1), 360);
-T1ang(T1ang >= 180) = T1ang(T1ang >= 180) - 360;   % −180..180
-direction = sign(T1ang); %1: right first, -1: left first
+% Target direction: right = +1, left = -1 (computed per trial in getJivesData
+% from Target_1_position, same cart2pol -> compass-degrees conversion)
+direction = tsum.direction(vIdx); %1: right first, -1: left first
 
 
-% Reaction time (ms)
-hasRT = ~isnan([tValid.Choicetime]) & ~isnan([tValid.Fixation_point_off]);
-RT    = ([tValid.Choicetime] - [tValid.Fixation_exited])/1000; % in s
+% Reaction time (ms) — row-oriented, as the RT panels below expect
+hasRT = tsum.hasRT(vIdx).';
+RT    = tsum.RT(vIdx).'; % in s
 
 %Proportion of rightward choices
 choiceLR = chooseN;
@@ -168,12 +173,12 @@ choiceLR(direction == -1 & chooseN==2) = 1; %rightward choices
 choiceLR(direction == 1 & chooseN==2) = 0; %leftward choices
 
 %Loop over the time asychrony
-stimulus = [tValid.Requested_target_2_time_offset]';
+stimulus = tsum.stimulus(vIdx);
 stimulus_dir = stimulus .* direction;
 [stim_levels, ~, idx] = unique(stimulus_dir);
 pRight = accumarray(idx, choiceLR==1, [], @mean);
 
-TotalTrials = numel(tValid);
+TotalTrials = numel(vIdx);
 
 % Fit only once BOTH onset-first conditions exist (points on both sides of
 % zero asynchrony) — a sigmoid is unconstrained otherwise.
@@ -194,14 +199,30 @@ if canFitPsy
     % Adaptive iteration cap: few trials -> few iterations (fast, rough),
     % growing as data accumulates for a more accurate fit later.
     maxIter = min(400, 60 + 4*TotalTrials);
-    optz = optimset('MaxIter', maxIter, 'MaxFunEvals', 2*maxIter, 'Display','off');
+    if isempty(optz)
+        optz = optimset('Display','off');      % built once, not every tick
+    end
+    optz.MaxIter    = maxIter;
+    optz.MaxFunEvals = 2*maxIter;
 
-    p0   = [0, log(0.02)];                    % start: zero bias, gentle slope
+    % Warm start from the previous tick's solution. One extra trial barely
+    % moves the MLE, so the simplex converges in a handful of iterations
+    % instead of rebuilding from scratch (up to 800 full-vector evaluations).
+    if isempty(pPrev) || any(~isfinite(pPrev))
+        p0 = [0, log(0.02)];                  % cold: zero bias, gentle slope
+    else
+        p0 = pPrev;
+    end
     pHat = fminsearch(nll, p0, optz);
 
     b0 = pHat(1);
     b1 = exp(pHat(2));                        % > 0 by construction
     validFit = isfinite(b0) && isfinite(b1) && b1 > 0;
+    if validFit
+        pPrev = pHat;                         % seed for the next tick
+    else
+        pPrev = [];                           % bad fit — cold start next time
+    end
 else
     validFit = false;
     b0 = NaN; b1 = NaN;
@@ -283,8 +304,11 @@ relSize = @(nn) relDotSize(nn, gMaxN);
 RT_FIT_MIN = 6;   % min trials in a choice group before its RT line is drawn
 
 % --- Leftward onset first (stimulus_dir <= 0) ---
-set(rtdot_L,'XData',[],'YData',[]); set(rtx_L,'XData',[],'YData',[]);
-set(rtlast_L,'XData',[],'YData',[]); clearpoints(rtfit_L); rtxt_L.String = '';
+% Each object is written ONCE per tick. The previous version blanked these
+% and then immediately re-set them a few lines later, costing two graphics
+% invalidations per object where one does.
+clearpoints(rtfit_L); rtxt_L.String = '';
+blankScatter(rtlast_L);
 
 if ~isempty(levFL)
     set(rtdot_L,'XData',levFL,'YData',mrtFL,'SizeData',relSize(nFL));
@@ -293,9 +317,13 @@ if ~isempty(levFL)
         [rmatL, pmatL] = corrcoef(stimulus_dir(fillL), rtCol(fillL));
         rtxt_L.String = sprintf('r=%.2f  p=%.3f', rmatL(1,2), pmatL(1,2));
     end
+else
+    blankScatter(rtdot_L);
 end
 if ~isempty(levXL)
     set(rtx_L,'XData',levXL,'YData',mrtXL,'SizeData',relSize(nXL));
+else
+    blankScatter(rtx_L);
 end
 % encircle the most recent trial's point, on whichever group it belongs to
 if hasRTcol(end) && stimulus_dir(end) <= 0
@@ -307,8 +335,8 @@ if hasRTcol(end) && stimulus_dir(end) <= 0
 end
 
 % --- Rightward onset first (stimulus_dir >= 0) ---
-set(rtdot_R,'XData',[],'YData',[]); set(rtx_R,'XData',[],'YData',[]);
-set(rtlast_R,'XData',[],'YData',[]); clearpoints(rtfit_R); rtxt_R.String = '';
+clearpoints(rtfit_R); rtxt_R.String = '';
+blankScatter(rtlast_R);
 
 if ~isempty(levFR)
     set(rtdot_R,'XData',levFR,'YData',mrtFR,'SizeData',relSize(nFR));
@@ -317,9 +345,13 @@ if ~isempty(levFR)
         [rmatR, pmatR] = corrcoef(stimulus_dir(fillR), rtCol(fillR));
         rtxt_R.String = sprintf('r=%.2f  p=%.3f', rmatR(1,2), pmatR(1,2));
     end
+else
+    blankScatter(rtdot_R);
 end
 if ~isempty(levXR)
     set(rtx_R,'XData',levXR,'YData',mrtXR,'SizeData',relSize(nXR));
+else
+    blankScatter(rtx_R);
 end
 if hasRTcol(end) && stimulus_dir(end) >= 0
     if choiceLR(end) == 1
@@ -330,7 +362,7 @@ if hasRTcol(end) && stimulus_dir(end) >= 0
 end
 
 %hold off
-drawnow
+% No drawnow here — jivesAnalysisSwitchyard issues one flush per tick.
 %{
 catch
     keyboard
@@ -370,6 +402,15 @@ function s = ringSize(markerArea)
 % Hollow ring area that encircles (sits outside) a marker of markerArea.
 s = markerArea*2 + 40;
 end
+
+function blankScatter(h)
+% Blank a scatter object. SizeData must be reset along with XData/YData:
+% these scatters carry a per-point size vector (dot area encodes trials per
+% level), and leaving a stale N-element SizeData against empty coordinates
+% makes the renderer emit "Data lengths must match" warnings.
+set(h, 'XData', [], 'YData', [], 'SizeData', 36);
+end
+
 
 function ringRT(h, lev, mrt, n, x, sizeFcn)
 % Position the hollow latest-trial ring h at asynchrony level x (if present),

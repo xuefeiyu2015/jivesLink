@@ -13,7 +13,12 @@ function plotJivesReceptiveField(nFig)
 %
 % 8 equal 45° direction sectors × 2 eccentricity bins (< ECC_NEAR, ≥ ECC_NEAR).
 
-global trials
+% Spike timestamps live in the parallel global `spikeTrials` (flat .ts/.ch/
+% .unit arrays per trial), not inside `trials`. spikeNCh / spikeNUnits carry
+% the spike-buffer dimensions and are what size the channel/unit dropdowns —
+% they must come from the buffer, not from the spikes actually present, or
+% the channel list would shrink whenever activity is sparse.
+global trials spikeTrials spikeNCh spikeNUnits
 
 % ── Constants ─────────────────────────────────────────────────────────────
 RF_WIN_MS    = [50, 250];
@@ -47,7 +52,10 @@ persistent fig hChDD hUnitDD hRFt0 hRFt1 hPSTHt0 hPSTHt1 hAlignDD ...
            tgt_xy lastTgtTrial ...
            psthN psthMean psthM2 ...
            lastPSTHTrial lastPSTHch lastPSTHunitSel lastPSTHwin lastPSTHalign ...
-           activeRFTask clearWatermark
+           activeRFTask clearWatermark ...
+           hFillPS hLinePS hZeroPS hImg hTgt hEll hCross hLbl ...
+           lastSharedYLim lastPanelTitle needFullDraw ...
+           gridFRsmCache lastSmoothN
 
 if isempty(trials); return; end
 
@@ -102,8 +110,12 @@ if isempty(fig) || ~isvalid(fig)
     uicontrol(fig,'Style','text','Units','pixels', ...
         'Position',[20 y 30 22],'String','Ch:', ...
         'HorizontalAlignment','right','FontSize',11);
+    % Seed from the live channel count; the refresh block below keeps it in
+    % sync. (Previously hard-coded to 96, which was wrong at 256 channels
+    % until the refresh path happened to run.)
+    if isempty(spikeNCh) || spikeNCh < 1; nChSeed = 1; else; nChSeed = spikeNCh; end
     hChDD = uicontrol(fig,'Style','popupmenu','Units','pixels', ...
-        'Position',[54 ye 80 22],'String',arrayfun(@num2str,1:96,'uni',0), ...
+        'Position',[54 ye 80 22],'String',arrayfun(@num2str,1:nChSeed,'uni',0), ...
         'Value',1,'FontSize',11,'Callback',CB);
 
     % Unit
@@ -215,18 +227,30 @@ if isempty(fig) || ~isvalid(fig)
     axPS(16) = axes(pPlot,'Units','normalized','Position',[x6R, y5,  pw, ph]); % SE-far
 
     lastNCh = [];  lastNUnits = [];
+    % Everything must be painted once on the tick that creates the axes.
+    needFullDraw   = true;
+    lastSharedYLim = [];
+    lastPanelTitle = repmat({''}, N_SECTORS, 1);
+    hFillPS = gobjects(N_SECTORS,1);
+    hLinePS = gobjects(N_SECTORS,1);
+    hZeroPS = gobjects(N_SECTORS,1);
+    hImg = gobjects(0); hTgt = gobjects(0); hEll = gobjects(0);
+    hCross = gobjects(0); hLbl = gobjects(0);
+    gridFRsmCache = []; lastSmoothN = -1;
 end
 
 % ── Refresh channel/unit dropdowns ────────────────────────────────────────
-if isfield(trials(end), 'spike_times') && ~isempty(trials(end).spike_times)
-    nCh = size(trials(end).spike_times, 1);
+% Sized from the spike-BUFFER dimensions, which are the full channel/unit
+% count regardless of which channels fired on the most recent trial.
+if ~isempty(spikeNCh) && spikeNCh >= 1
+    nCh = spikeNCh;
     if isempty(lastNCh) || lastNCh ~= nCh
         hChDD.String = arrayfun(@num2str, 1:nCh, 'uni', 0);
         hChDD.Value  = min(chSel, nCh);
         chSel        = hChDD.Value;
         lastNCh      = nCh;
     end
-    nUnits = max(0, size(trials(end).spike_times, 2));   % every col is a unit (col 1 = unsorted, col 2+ = sorted)
+    nUnits = max(0, spikeNUnits);   % every col is a unit (col 1 = unsorted, col 2+ = sorted)
     if isempty(lastNUnits) || lastNUnits ~= nUnits
         unitStrs = [arrayfun(@num2str, 1:nUnits, 'uni', 0), {'all'}];
         hUnitDD.String = unitStrs;
@@ -327,36 +351,47 @@ winSec = rfWin / 1000;
 winDur = diff(rfWin) / 1000;
 
 % ── Early exit if nothing to do ──────────────────────────────────────────
-loopStart = min(rfStart, psthStart);
-if loopStart > nTrials && ~rfChanged && ~psthChanged && ~forceClear
+% A pending Fit RF must keep us alive: the button sets doFitRF and re-invokes
+% immediately, so if this returned early the flag would sit unconsumed and
+% the fit would not appear until the next trial happened to arrive.
+fitPending = isfield(fig.UserData,'doFitRF') && fig.UserData.doFitRF;
+loopStart  = min(rfStart, psthStart);
+if loopStart > nTrials && ~rfChanged && ~psthChanged && ~forceClear && ~fitPending
     return;   % no new trials, no parameter change — display already current
 end
 
 % ── Incremental accumulation ─────────────────────────────────────────────
+% Sectors whose PSTH accumulator changes on this pass. Only these panels are
+% repainted below. A parameter change or a Clear resets the accumulators, so
+% in that case every panel must be repainted regardless of what arrived.
+dirtySec = false(N_SECTORS, 1);
+if psthChanged || forceClear || needFullDraw
+    dirtySec(:) = true;
+end
 
 for n = loopStart : nTrials
     if ~isfield(trials(n), 'Task')         || ~isequal(trials(n).Task, activeRFTask); continue; end
-    if ~isfield(trials(n), 'spike_times'); continue; end
+    if n > numel(spikeTrials); continue; end
     correct = isfield(trials(n), 'Trialoutcome') && ischar(trials(n).Trialoutcome) && ...
               contains(trials(n).Trialoutcome, 'correct');
-    sp = trials(n).spike_times;
-    if isempty(sp) || chSel > size(sp, 1); continue; end
 
-    % Build single merged spike vector for this trial
-    if unitSel == -1
-        allSpks = [];
-        for u = 1 : size(sp, 2)
-            if ~isempty(sp{chSel, u})
-                allSpks = [allSpks; sp{chSel, u}(:)]; %#ok<AGROW>
-            end
-        end
-        allSpks = sort(allSpks);
+    % Select this trial's spikes as a contiguous slice via the channel offset
+    % table. Spikes are grouped by channel and time-ordered within a channel,
+    % so this needs no mask over the whole trial and no sort() — in "all
+    % units" mode the slice is already in time order.
+    S = spikeTrials(n);
+    if isempty(S.ts) || chSel + 1 > numel(S.chStart)
+        allSpks = zeros(0, 1);
     else
-        u = unitSel;
-        if u <= size(sp, 2) && ~isempty(sp{chSel, u})
-            allSpks = sp{chSel, u}(:);
-        else
+        a = double(S.chStart(chSel));
+        b = double(S.chStart(chSel+1)) - 1;
+        if b < a
             allSpks = zeros(0, 1);
+        elseif unitSel == -1
+            allSpks = S.ts(a:b);
+        else
+            seg     = a:b;
+            allSpks = S.ts(seg(S.unit(seg) == unitSel));
         end
     end
 
@@ -426,6 +461,7 @@ for n = loopStart : nTrials
             delta             = fr - psthMean(sIdx,:);
             psthMean(sIdx,:)  = psthMean(sIdx,:) + delta / psthN(sIdx);
             psthM2(sIdx,:)    = psthM2(sIdx,:) + delta .* (fr - psthMean(sIdx,:));
+            dirtySec(sIdx)    = true;
         end
     end
 end
@@ -441,22 +477,37 @@ RF_EXTRAP_MIN = 10;
 hasData   = ~isnan(gridFR);
 nPts      = sum(hasData(:));
 nRFobs    = sum(gridN(:));          % total target-onset observations
-[gxm, gym] = meshgrid(GRID_CTRS, GRID_CTRS);
 
-if nPts >= 3 && nRFobs >= 2 * RF_EXTRAP_MIN
-    % Enough data: natural-neighbor interpolation inside hull, nearest outside
-    F = scatteredInterpolant(gxm(hasData), gym(hasData), ...
-                             double(gridFR(hasData)), 'natural', 'nearest');
-    gridFR_sm = imgaussfilt(F(gxm, gym), SMOOTH_SIGMA);
-elseif nPts >= 1
-    % Early trials: NaN-aware smoothing, no extrapolation into empty regions
-    dataMap   = gridFR; dataMap(~hasData) = 0;
-    smoothNum = imgaussfilt(dataMap,          SMOOTH_SIGMA);
-    smoothDen = imgaussfilt(double(hasData),  SMOOTH_SIGMA);
-    gridFR_sm = smoothNum ./ max(smoothDen, 1e-6);
-    gridFR_sm(smoothDen < 0.02) = 0;
+% Rebuilding the interpolant and re-filtering the 40x40 grid on every tick is
+% wasted work — a single trial barely moves the map. Refresh once enough new
+% observations have landed, and always when a parameter change, a Clear or a
+% pending RF fit means the cached map can no longer be trusted.
+RF_SMOOTH_EVERY = 5;                % observations between refreshes
+needSmooth = isempty(gridFRsmCache) || rfChanged || forceClear || ...
+             needFullDraw || fitPending || ...
+             (nRFobs - lastSmoothN) >= RF_SMOOTH_EVERY;
+
+if needSmooth
+    [gxm, gym] = meshgrid(GRID_CTRS, GRID_CTRS);
+    if nPts >= 3 && nRFobs >= 2 * RF_EXTRAP_MIN
+        % Enough data: natural-neighbor interpolation inside hull, nearest outside
+        F = scatteredInterpolant(gxm(hasData), gym(hasData), ...
+                                 double(gridFR(hasData)), 'natural', 'nearest');
+        gridFR_sm = imgaussfilt(F(gxm, gym), SMOOTH_SIGMA);
+    elseif nPts >= 1
+        % Early trials: NaN-aware smoothing, no extrapolation into empty regions
+        dataMap   = gridFR; dataMap(~hasData) = 0;
+        smoothNum = imgaussfilt(dataMap,          SMOOTH_SIGMA);
+        smoothDen = imgaussfilt(double(hasData),  SMOOTH_SIGMA);
+        gridFR_sm = smoothNum ./ max(smoothDen, 1e-6);
+        gridFR_sm(smoothDen < 0.02) = 0;
+    else
+        gridFR_sm = zeros(size(gridFR));
+    end
+    gridFRsmCache = gridFR_sm;
+    lastSmoothN   = nRFobs;
 else
-    gridFR_sm = zeros(size(gridFR));
+    gridFR_sm = gridFRsmCache;
 end
 
 % ── 2-D Gaussian fit (triggered by Fit RF button) ────────────────────────
@@ -482,20 +533,23 @@ if ~isvalid(fig) || ~isvalid(axHM) || any(~isvalid(axPS))
 end
 
 % ── Draw heatmap (reuse objects — no cla) ─────────────────────────────────
-hImg = findobj(axHM, 'Tag','rf_img');
-if isempty(hImg)
+% Handles are cached in persistents rather than re-found with findobj on
+% every tick (that was ~5 hierarchy searches here plus 3 per PSTH panel).
+if isempty(hImg) || ~isgraphics(hImg)
     hold(axHM,'on');
     hImg = imagesc(axHM, GRID_CTRS, GRID_CTRS, gridFR_sm); hImg.Tag = 'rf_img';
     axis(axHM, [-20 20 -20 20]); axis(axHM,'equal'); axis(axHM,'square');
     scatter(axHM, 0, 0, 30, FIX_COLOR, 'filled', 'Tag','rf_fix');
-    scatter(axHM, nan, nan, 60, 'w','o','LineWidth',1.5,'Tag','rf_tgt');
-    plot(axHM, nan, nan, 'w-','LineWidth',2,'Tag','rf_ell');
-    plot(axHM, nan, nan, 'r+','MarkerSize',16,'LineWidth',2.5,'Tag','rf_cross');
-    text(axHM, 0, 0, '', 'Color','w','FontSize',9,'FontWeight','bold', ...
+    hTgt   = scatter(axHM, nan, nan, 60, 'w','o','LineWidth',1.5,'Tag','rf_tgt');
+    hEll   = plot(axHM, nan, nan, 'w-','LineWidth',2,'Tag','rf_ell');
+    hCross = plot(axHM, nan, nan, 'r+','MarkerSize',16,'LineWidth',2.5,'Tag','rf_cross');
+    hLbl   = text(axHM, 0, 0, '', 'Color','w','FontSize',9,'FontWeight','bold', ...
          'HorizontalAlignment','center','VerticalAlignment','top', ...
          'Tag','rf_lbl','Visible','off');
     colormap(axHM,'parula');
-    set(axHM,'YDir','normal','XTick',[],'YTick',[]);
+    % Axis limits are fixed — set once here, not pushed on every tick.
+    set(axHM,'YDir','normal','XTick',[],'YTick',[], ...
+             'XLim',[-20 20],'YLim',[-20 20],'SortMethod','childorder');
     box(axHM,'on');
     cb = colorbar(axHM,'Location','eastoutside','FontSize',7);
     cb.Label.String = 'FR (sp/s)';  cb.Label.FontSize = 7;
@@ -504,7 +558,6 @@ else
 end
 
 % Update target scatter
-hTgt = findobj(axHM,'Tag','rf_tgt');
 if ~isempty(tgt_xy)
     set(hTgt,'XData',tgt_xy(:,1),'YData',tgt_xy(:,2));
 else
@@ -515,9 +568,6 @@ end
 rf   = fig.UserData.rfFit;
 rfOK = ~isempty(rf) && all(isfinite([rf.x0,rf.y0,rf.sx,rf.sy])) && ...
        rf.sx > 0 && rf.sx < 20 && rf.sy > 0 && rf.sy < 20;
-hEll   = findobj(axHM,'Tag','rf_ell');
-hCross = findobj(axHM,'Tag','rf_cross');
-hLbl   = findobj(axHM,'Tag','rf_lbl');
 if rfOK
     th = linspace(0,2*pi,200);
     set(hEll,   'XData',rf.x0+rf.sx*cos(th),'YData',rf.y0+rf.sy*sin(th));
@@ -530,7 +580,7 @@ else
     set(hCross,'XData',nan,'YData',nan);
     set(hLbl,  'Visible','off');
 end
-set(axHM,'XLim',[-20 20],'YLim',[-20 20]);
+% XLim/YLim are fixed and were set when the axes were created.
 
 if unitSel == -1; unitLbl = 'all'; else; unitLbl = num2str(unitSel); end
 if rfOK
@@ -539,7 +589,10 @@ if rfOK
 else
     titleStr = sprintf('Ch %d  Unit %s  (n=%d trials)', chSel, unitLbl, nRFcorrect);
 end
-title(axHM, titleStr, 'FontSize',10);
+if ~strcmp(axHM.Title.String, titleStr)     % only touch the text if it moved
+    axHM.Title.String   = titleStr;
+    axHM.Title.FontSize = 10;
+end
 
 % ── Draw 16 spatial PSTHs ─────────────────────────────────────────────────
 % Shared y-axis range across all 16 sectors
@@ -547,13 +600,26 @@ allMax = max(max(smMean + smSEM, [], 2));
 if isnan(allMax) || allMax <= 0; allMax = 1; end
 sharedYLim = [0, allMax * 1.1];
 
+% A trial contributes to exactly one sector, so normally only that panel's
+% trace changed. The shared y-limit is the one thing that couples the panels:
+% when it moves, every panel needs the new limit even if its data is stale.
+ylChanged      = ~isequal(sharedYLim, lastSharedYLim);
+lastSharedYLim = sharedYLim;
+
 clr = [0.2 0.5 0.9];
 noXSectors = [1, 2, 3, 11, 12, 13];   % upper panel of each near/far pair
 for s = 1:N_SECTORS
-    drawPSTH(axPS(s), t_c_psth, smMean(s,:), smSEM(s,:), clr, ...
-             psthN(s), SECTOR_LABELS{s}, sharedYLim, ...
-             ~ismember(s, noXSectors));
+    if ~dirtySec(s) && ~ylChanged; continue; end
+    ttl = sprintf('%s  n=%d', SECTOR_LABELS{s}, psthN(s));
+    if strcmp(ttl, lastPanelTitle{s}); ttl = ''; end   % '' = leave title alone
+    if ~isempty(ttl); lastPanelTitle{s} = ttl; end
+    [hFillPS(s), hLinePS(s), hZeroPS(s)] = drawPSTH( ...
+             axPS(s), hFillPS(s), hLinePS(s), hZeroPS(s), ...
+             t_c_psth, smMean(s,:), smSEM(s,:), clr, ...
+             psthN(s), SECTOR_LABELS{s}, ttl, sharedYLim, ...
+             ~ismember(s, noXSectors), dirtySec(s));
 end
+needFullDraw = false;
 
 % Axis labels on the two reference panels
 if strcmp(alignStr, 'Visual onset')
@@ -569,35 +635,54 @@ end
 
 
 % ══════════════════════════════════════════════════════════════════════════
-function drawPSTH(ax, t_c, fr_mn, fr_se, clr, n, lbl, yl, showX)
-% Reuse graphics objects (no cla) to avoid WebContextMenuController errors
-hFill = findobj(ax, 'Tag','psth_fill');
-hLine = findobj(ax, 'Tag','psth_line');
-hZero = findobj(ax, 'Tag','psth_zero');
+function [hFill, hLine, hZero] = drawPSTH(ax, hFill, hLine, hZero, ...
+                                          t_c, fr_mn, fr_se, clr, n, lbl, ...
+                                          ttl, yl, showX, dataChanged)
+% Reuse graphics objects (no cla) to avoid WebContextMenuController errors.
+% Handles are passed in and returned rather than re-found with findobj on
+% every call — that was 3 hierarchy searches per panel, 48 per tick.
+%
+% ttl == '' means the title text is unchanged; leave the text object alone.
+% dataChanged == false means only the shared y-limit moved, so the trace
+% itself does not need to be rewritten.
 
-if isempty(hFill)
+% isgraphics, not isvalid: isvalid returns TRUE for the GraphicsPlaceholder
+% that gobjects() produces, so the objects would never get created.
+if isempty(hFill) || ~isgraphics(hFill)
     hold(ax,'on');
-    hFill = fill(ax, [nan nan],[nan nan], clr, ...
+    % The fill's x-vertices are constant for a given PSTH window — written
+    % once here, then only YData changes per update.
+    hFill = fill(ax, [t_c, fliplr(t_c)], nan(1, 2*numel(t_c)), clr, ...
                  'FaceAlpha',0.25,'EdgeColor','none','Tag','psth_fill');
-    hLine = plot(ax, nan, nan, 'Color',clr,'LineWidth',1.2,'Tag','psth_line');
+    hLine = plot(ax, t_c, nan(size(t_c)), 'Color',clr,'LineWidth',1.2,'Tag','psth_line');
     hZero = plot(ax, [0 0],[0 1],'--','Color',[0.6 0.6 0.6],'LineWidth',0.8,'Tag','psth_zero');
-    set(ax,'TickDir','out','FontSize',6,'Box','on');
+    set(ax,'TickDir','out','FontSize',6,'Box','on','SortMethod','childorder', ...
+           'XLim',[t_c(1), t_c(end)]);       % x range is fixed for this window
     t = title(ax, sprintf('%s  n=%d',lbl,n), 'FontSize',10,'FontWeight','bold');
     set(t,'Units','normalized','Position',[0.5, 1.02, 0]);
     if ~showX; set(ax,'XTickLabel',[]); end
+    dataChanged = true;                       % nothing drawn yet
 end
 
-if n > 0
-    set(hFill,'XData',[t_c, fliplr(t_c)],'YData',[fr_mn+fr_se, fliplr(fr_mn-fr_se)]);
-    set(hLine,'XData',t_c,'YData',fr_mn);
-else
-    set(hFill,'XData',[nan nan],'YData',[nan nan]);
-    set(hLine,'XData',nan,'YData',nan);
+if dataChanged
+    if n > 0
+        % XData already correct — only the envelope and the trace move.
+        set(hFill,'YData',[fr_mn+fr_se, fliplr(fr_mn-fr_se)]);
+        set(hLine,'YData',fr_mn);
+    else
+        set(hFill,'YData',nan(1, 2*numel(t_c)));
+        set(hLine,'YData',nan(size(t_c)));
+    end
 end
-set(hZero,'XData',[0 0],'YData',yl);
-xlim(ax,[t_c(1), t_c(end)]);
-ylim(ax, yl);
-ax.Title.String = sprintf('%s  n=%d', lbl, n);
+if ~isequal(hZero.YData, yl)
+    set(hZero,'YData',yl);
+end
+if ~isequal(ax.YLim, yl)
+    ylim(ax, yl);
+end
+if ~isempty(ttl)
+    ax.Title.String = ttl;
+end
 end
 
 
