@@ -13,7 +13,9 @@ function getJivesData()
 global inTrial trials fhComments fhTrials fhSpikes
 persistent localData spikeBuf   % spikeBuf: rolling per-(ch,unit) spike-timestamp cell
 
-dbstop if error
+% NB: no `dbstop if error` here — this runs 4x/second, and re-arming error
+% breakpoints every tick disables JIT acceleration session-wide and turns any
+% shutdown error into a silent debugger halt inside a timer callback.
 
 % Trial struct template — fields needed for online plots
 % Extended here rather than in the entry script to keep jivesBROnline clean.
