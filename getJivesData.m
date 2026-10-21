@@ -10,10 +10,20 @@ function getJivesData()
 % Trial parsing is adapted from doc/CommentTrialStructure.m.
 % Called by jivesBROnline.m — do not call directly.
 
-global inTrial trials fhComments fhTrials fhSpikes
+global inTrial trials spikeTrials tsum spikeNCh spikeNUnits fhComments fhTrials fhSpikes
 persistent localData spikeBuf   % spikeBuf: rolling per-(ch,unit) spike-timestamp cell
 
-dbstop if error
+% Companion globals to `trials`, all appended in the same block below so that
+%   tsum.n == numel(trials) == numel(spikeTrials)
+% holds at every point a plot function can observe them:
+%   spikeTrials  struct array, one entry per trial, flat .ts/.ch/.unit arrays
+%   tsum         preallocated numeric mirror of the fields the plots need
+%   spikeNCh     channel count of the spike buffer  (sizes the RF dropdown)
+%   spikeNUnits  unit-column count of the spike buffer
+
+% NB: no `dbstop if error` here — this runs 4x/second, and re-arming error
+% breakpoints every tick disables JIT acceleration session-wide and turns any
+% shutdown error into a silent debugger halt inside a timer callback.
 
 % Trial struct template — fields needed for online plots
 % Extended here rather than in the entry script to keep jivesBROnline clean.
@@ -33,9 +43,12 @@ TEMPLATE = struct( ...
     'Target_2_position',  [NaN NaN],  ...  % [x, y] deg
     'Requested_target_2_time_offset', NaN,...  %time onset offset for time delay task
     'Fixation_point_off', NaN,... %time of fixation point of i.e. go cue
-    'Fixation_exited', NaN,... %time of eyes exit the fixation window
-    'spike_times', {{}}...        % {nCh x nUnitCols} cell of absolute spike timestamps within [Start, End]
+    'Fixation_exited', NaN...  %time of eyes exit the fixation window
 );
+% NB: spike timestamps deliberately do NOT live in this struct any more — they
+% are appended to the parallel global `spikeTrials`. Keeping an nCh x nUnit
+% cell grid here made every slice, copy or comma-list expansion of `trials`
+% proportional to the channel count.
 
 % Flush both buffers every tick
 spikedata = cbmex('trialdata', 1);                        % keep spike buffer clear
@@ -57,13 +70,17 @@ if ~isempty(spikedata)
     if isempty(spikeBuf) || ~isequal(size(spikeBuf), [nCh nU])
         spikeBuf = cell(nCh, nU);
     end
-    for c = 1:nCh
-        for u = 1:nU
-            ts_new = spikedata{c, u};
-            if ~isempty(ts_new)
-                spikeBuf{c, u} = [spikeBuf{c, u}; ts_new(:)];
-            end
-        end
+    % Buffer dimensions are the FULL channel/unit count regardless of which
+    % channels happened to fire this tick. The RF dropdowns are sized from
+    % these, so they must not be derived from the spikes actually present or
+    % the channel list would shrink whenever activity is sparse.
+    spikeNCh    = nCh;
+    spikeNUnits = nU;
+    % Touch only the cells carrying new spikes. The blanket nested loop cost
+    % nCh*nU iterations 4x/second — 1024 of them at 256x4, nearly all no-ops.
+    nz = find(~cellfun(@isempty, spikedata)).';
+    for q = nz
+        spikeBuf{q} = [spikeBuf{q}; spikedata{q}(:)];
     end
 end
 [cmts, ts, ~, ~] = cbmex('trialcomment', 1);  % flush comment buffer
@@ -225,17 +242,54 @@ for i = 1:numel(cmts)
         end
         localData.End = t;
         % --- slice spike buffer to this trial's window; trim past spikes ---
+        % Flat columnar storage (ts / ch / unit) rather than an nCh x nUnit
+        % cell grid. At 256 ch x 4 units the grid cost ~1024 mxArray headers
+        % per trial (~100 kB) even when nearly every cell was empty, and that
+        % overhead was paid again by every slice or copy of `trials`. Three
+        % numeric arrays hold the same information and let the RF plot select
+        % spikes with a logical mask instead of a per-unit cell loop.
+        % chStart is an offset table: channel c occupies ts(chStart(c) :
+        % chStart(c+1)-1). Without it, selecting a channel means a mask over
+        % EVERY spike in the trial (~nCh*rate comparisons), which made the RF
+        % channel-switch rebuild scale with channel count. With it, selecting
+        % a channel is a contiguous slice, as cheap as the old cell index.
+        nChBuf = size(spikeBuf, 1);
+        spk = struct('ts',      zeros(0,1), ...
+                     'ch',      zeros(0,1,'uint16'), ...
+                     'unit',    zeros(0,1,'uint8'), ...
+                     'chStart', ones(nChBuf+1, 1, 'uint32'));
         if ~isempty(spikeBuf)
-            localData.spike_times = cell(size(spikeBuf));
-            for c = 1:size(spikeBuf,1)
-                for u = 1:size(spikeBuf,2)
-                    ts_all = spikeBuf{c, u};
-                    if ~isempty(ts_all)
-                        mask = ts_all >= localData.Start & ts_all <= localData.End;
-                        localData.spike_times{c, u} = ts_all(mask);
-                        spikeBuf{c, u} = ts_all(ts_all > localData.End);
+            nz = find(~cellfun(@isempty, spikeBuf)).';
+            if ~isempty(nz)
+                [rIdx, cIdx] = ind2sub(size(spikeBuf), nz);
+                % Typed empties so vertcat keeps the class even when a trial
+                % has no spikes in window on some channels.
+                tsC = repmat({zeros(0,1)},          numel(nz), 1);
+                chC = repmat({zeros(0,1,'uint16')}, numel(nz), 1);
+                unC = repmat({zeros(0,1,'uint8')},  numel(nz), 1);
+                for q = 1:numel(nz)
+                    ts_all = spikeBuf{nz(q)};
+                    mask   = ts_all >= localData.Start & ts_all <= localData.End;
+                    nsp    = sum(mask);
+                    if nsp > 0
+                        tsC{q} = ts_all(mask);
+                        chC{q} = repmat(uint16(rIdx(q)), nsp, 1);
+                        unC{q} = repmat(uint8(cIdx(q)),  nsp, 1);
                     end
+                    spikeBuf{nz(q)} = ts_all(ts_all > localData.End);
                 end
+                spk.ts   = vertcat(tsC{:});
+                spk.ch   = vertcat(chC{:});
+                spk.unit = vertcat(unC{:});
+                % Group by channel, and by time within each channel. A single
+                % channel's spikes are then contiguous AND time-ordered, so a
+                % slice needs no further sort even in "all units" mode.
+                [~, ord] = sortrows([double(spk.ch), spk.ts]);
+                spk.ts   = spk.ts(ord);
+                spk.ch   = spk.ch(ord);
+                spk.unit = spk.unit(ord);
+                cnts        = accumarray(double(spk.ch), 1, [nChBuf 1]);
+                spk.chStart = uint32([1; 1 + cumsum(cnts)]);
             end
         end
         % REVISED: append directly to global trials instead of returning a
@@ -251,10 +305,41 @@ for i = 1:numel(cmts)
             %}
             trials(end+1) = localData;
         end
+        if isempty(spikeTrials)
+            spikeTrials = spk;
+        else
+            spikeTrials(end+1) = spk;
+        end
+
+        % --- numeric summary mirror -----------------------------------------
+        % Every value the dashboard and the psychometric plot need, decoded
+        % ONCE here, so neither has to scan the `trials` struct array on the
+        % T2 tick. Appended in lockstep with `trials`/`spikeTrials` above.
+        if isempty(tsum);      tsum = tsumInit(1000); end
+        if tsum.n >= tsum.cap; tsum = tsumGrow(tsum);  end
+        k = tsum.n + 1;
+        tsum.trialNum(k)   = localData.Trial_number;
+        tsum.outcome(k)    = outcomeMask(localData.Trialoutcome);
+        tsum.isTimeTask(k) = contains(localData.Task, 'time');
+        tsum.choice(k)     = localData.Choosen_choice;
+        tsum.stimulus(k)   = localData.Requested_target_2_time_offset;
+        tsum.direction(k)  = t1Direction(localData.Target_1_position);
+        % NB: hasRT tests Fixation_point_off while RT is measured from
+        % Fixation_exited. That asymmetry is reproduced exactly as
+        % plotJivesPsychometrics computed it — not silently "fixed" here.
+        tsum.hasRT(k)      = ~isnan(localData.Choicetime) && ...
+                             ~isnan(localData.Fixation_point_off);
+        tsum.RT(k)         = (localData.Choicetime - localData.Fixation_exited)/1000;
+        tsum.n             = k;
 
         % Stream completed trial to CSV log file
         if ~isempty(fhTrials) && fhTrials > 0
-            fprintf(fhTrials, '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n', ...
+            % 18 specifiers for 18 values. This previously had only 17: MATLAB
+            % RECYCLES the format when arguments remain, so each trial wrote 17
+            % fields + newline and then Fixation_point_off with no newline,
+            % which ran into the next trial's row. Every row after the first
+            % was shifted one column right, and the file ended mid-row.
+            fprintf(fhTrials, '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n', ...
                 fmtVal(localData.Trial_number), ...
                 fmtVal(localData.Task), ...
                 fmtVal(localData.Trial_type), ...
@@ -290,6 +375,71 @@ catch
 end
 %}
 end
+
+function tsum = tsumInit(cap)
+% Preallocated numeric mirror of `trials`. Grown in chunks so appending a
+% trial is amortised O(1) rather than reallocating the whole array.
+tsum = struct( ...
+    'n',          0, ...
+    'cap',        cap, ...
+    'trialNum',   nan(cap,1), ...
+    'outcome',    zeros(cap,1,'uint8'), ...
+    'isTimeTask', false(cap,1), ...
+    'choice',     nan(cap,1), ...
+    'stimulus',   nan(cap,1), ...
+    'direction',  nan(cap,1), ...
+    'RT',         nan(cap,1), ...
+    'hasRT',      false(cap,1));
+end
+
+
+function tsum = tsumGrow(tsum)
+% Double the capacity, preserving the values already stored.
+pad = tsum.cap;
+tsum.trialNum   = [tsum.trialNum;   nan(pad,1)];
+tsum.outcome    = [tsum.outcome;    zeros(pad,1,'uint8')];
+tsum.isTimeTask = [tsum.isTimeTask; false(pad,1)];
+tsum.choice     = [tsum.choice;     nan(pad,1)];
+tsum.stimulus   = [tsum.stimulus;   nan(pad,1)];
+tsum.direction  = [tsum.direction;  nan(pad,1)];
+tsum.RT         = [tsum.RT;         nan(pad,1)];
+tsum.hasRT      = [tsum.hasRT;      false(pad,1)];
+tsum.cap        = tsum.cap + pad;
+end
+
+
+function m = outcomeMask(s)
+% Encode a Trialoutcome string as a bitmask:
+%   bit 1 (1) = 'correct'   bit 2 (2) = 'broke'
+%   bit 3 (4) = 'timeout'   bit 4 (8) = 'wrong'
+% Kept as four INDEPENDENT bits rather than one exclusive code, so a string
+% matching more than one term is counted in both — exactly as the four
+% separate contains() tests in plotJivesDashboard behaved.
+% Case-sensitive on purpose: Jives sends lowercase (see CLAUDE.md).
+m = uint8(0);
+if ~(ischar(s) || isstring(s)); return; end
+s = char(s);
+if contains(s, 'correct'); m = bitor(m, uint8(1)); end
+if contains(s, 'broke');   m = bitor(m, uint8(2)); end
+if contains(s, 'timeout'); m = bitor(m, uint8(4)); end
+if contains(s, 'wrong');   m = bitor(m, uint8(8)); end
+end
+
+
+function d = t1Direction(xy)
+% Sign of the target-1 direction: +1 = right, -1 = left, NaN if unknown.
+% Mirrors the cart2pol -> compass-degrees conversion that
+% plotJivesPsychometrics applied to Target_1_position.
+if numel(xy) < 2 || any(isnan(xy(1:2)))
+    d = NaN;
+    return;
+end
+th  = cart2pol(xy(1), xy(2));
+ang = mod(90 - rad2deg(th), 360);
+if ang >= 180; ang = ang - 360; end     % wrap to -180..180
+d = sign(ang);
+end
+
 
 function s = fmtVal(v)
 % Convert a struct field value (numeric scalar or string) to a CSV token.

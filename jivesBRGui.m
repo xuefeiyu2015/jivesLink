@@ -11,7 +11,8 @@ fig = uifigure('Name',     'Jives BR Online', ...
                'Resize',   'off', ...
                'CloseRequestFcn', @(f,~) onCloseWindow(f));
 
-fig.UserData = struct('T1', [], 'T2', [], 'T_ui', [], 'running', false);
+fig.UserData = struct('T1', [], 'T2', [], 'T_ui', [], 'running', false, ...
+                      'closing', false, 'starting', false);
 
 %% Status row
 uilabel(fig, 'Position', [20 267 55 20], 'Text', 'Status:');
@@ -40,13 +41,14 @@ hStart.ButtonPushedFcn = @(~,~) onStart(fig, hStart, hStatus);
 
 fig.UserData.startBtn = hStart;   % store so onCloseAll can re-enable it
 fig.UserData.hTask    = hTask;    % store so onCloseAll can reset it
-uibutton(fig, 'push', ...
+hClose = uibutton(fig, 'push', ...
     'Position',       [190 155 150 50], ...
     'Text',           'Close All', ...
     'FontSize',       15, ...
     'FontWeight',     'bold', ...
     'BackgroundColor', [0.85 0.33 0.10], ...
     'ButtonPushedFcn', @(~,~) onCloseAll(fig, hStatus));
+fig.UserData.closeBtn = hClose;   % stored so shutdownPipeline can disable it
 
 %% Export section
 uilabel(fig, 'Position', [20 122 320 20], ...
@@ -103,8 +105,8 @@ end % jivesBRGui
 
 function onStart(fig, hStart, hStatus)
     ud = fig.UserData;
-    if ud.running
-        return
+    if ud.running || ud.starting || ud.closing
+        return   % re-entrancy guard: ignore repeat presses while busy
     end
 
     % Recording check
@@ -136,14 +138,42 @@ function onStart(fig, hStart, hStatus)
         close(openFigs);
     end
 
+    % Mark busy and give immediate feedback — cbmex('open') blocks for
+    % seconds and without this the window just freezes with no explanation.
+    ud.starting = true;
+    fig.UserData = ud;
+    hStart.Enable     = 'off';
+    hStatus.Text      = 'Connecting...';
+    hStatus.FontColor = [0.85 0.55 0.10];
+    drawnow limitrate nocallbacks
+
     % Reset globals
     global trials inTrial fhComments fhTrials fhSpikes
     trials  = struct([]);
     inTrial = false;
 
+    % Connect cbmex BEFORE opening any log files, so a failed connect cannot
+    % leak file handles or leave empty files on disk.
+    try
+        % Drop any half-open socket left by a previous session. Without this,
+        % cbmex('open') sits on a connect timeout after an unclean shutdown —
+        % the main reason Start feels slow on the second and later runs.
+        try; cbmex('close'); catch; end
+        cbmex('open')
+        cbmex('trialconfig', 1, 'double', 'absolute', 'comment', 200)
+    catch ME
+        ud.starting = false;
+        fig.UserData = ud;
+        hStart.Enable     = 'on';
+        hStatus.Text      = 'Stopped';
+        hStatus.FontColor = [0.7 0.1 0.1];
+        uialert(fig, ME.message, 'cbmex error');
+        return
+    end
+
     % Open streaming log files for this session (conditional on checkboxes)
-    dtStr      = datestr(now, 'yyyymmdd_HHMMSS');
-    dateStr    = datestr(now, 'yyyy-mm-dd');   % date subfolder name
+    dtStr      = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
+    dateStr    = char(datetime('now', 'Format', 'yyyy-MM-dd'));   % date subfolder
     exportPath = fig.UserData.hExportPath.Value;
     if fig.UserData.chkComments.Value
         commentsDir = fullfile(exportPath, 'comments_online', dateStr);
@@ -169,39 +199,39 @@ function onStart(fig, hStart, hStatus)
         if ~isfolder(trialsDir); mkdir(trialsDir); end
         trialFile = fullfile(trialsDir, ['trials_' dtStr '.csv']);
         fhTrials  = fopen(trialFile, 'w');
-        fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_point_off\n');
+        % 18 columns — must match the fprintf in getJivesData exactly. The
+        % header previously omitted Fixation_exited, so the column labelled
+        % Fixation_point_off actually carried Fixation_exited.
+        fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_exited,Fixation_point_off\n');
         fprintf('[Export] trials   → %s\n', trialFile);
     else
         fhTrials = [];
     end
 
-    % Connect cbmex
-    try
-       
-        cbmex('open')
-        cbmex('trialconfig', 1, 'double', 'absolute', 'comment', 200)
-    catch ME
-        uialert(fig, ME.message, 'cbmex error');
-        return
-    end
-
     % REVISED: T1 calls getJivesData with no output — completed trials are
     % appended directly to global `trials` inside getJivesData.
-    T1 = timer('Name', 'Jives_Acquire', 'Period', 0.25, 'ExecutionMode', 'fixedRate', ...
+    % ExecutionMode is 'fixedSpacing', NOT 'fixedRate'. Under fixedRate a
+    % callback that overruns its period leaves MATLAB queueing the missed
+    % executions cumulatively, so the timer never goes idle again — that is
+    % exactly the saturation described in shutdownPipeline below, and it is
+    % what made Close All hang. fixedSpacing waits Period AFTER the callback
+    % returns, so an overrun self-limits instead of compounding.
+    T1 = timer('Name', 'Jives_Acquire', 'Period', 0.25, 'ExecutionMode', 'fixedSpacing', ...
                'TimerFcn', 'getJivesData();', ...            % REVISED
                'ErrorFcn', @(~,e) fprintf('[T1 error] %s\n', e.Data.message));
 
     % REVISED: T2 switchyard takes no argument — reads global `trials` directly.
-    T2 = timer('Name', 'Jives_Plot', 'Period', 1.0, 'ExecutionMode', 'fixedRate', ...
+    T2 = timer('Name', 'Jives_Plot', 'Period', 1.0, 'ExecutionMode', 'fixedSpacing', ...
                'TimerFcn', 'jivesAnalysisSwitchyard();', ... % REVISED
                'ErrorFcn', @(~,e) fprintf('[T2 error] %s\n', e.Data.message));
 
     start(T1);
     start(T2);
 
-    ud.T1      = T1;
-    ud.T2      = T2;
-    ud.running = true;
+    ud.T1       = T1;
+    ud.T2       = T2;
+    ud.running  = true;
+    ud.starting = false;
     fig.UserData = ud;
 
     hStart.Enable = 'off';
@@ -212,27 +242,129 @@ end
 %% =========================================================================
 
 function onCloseAll(fig, hStatus)
+    shutdownPipeline(fig, hStatus, true);
+end
+
+%% =========================================================================
+
+function shutdownPipeline(fig, hStatus, restoreUI)
+% Tear down the acquisition pipeline. Shared by the Close All button and the
+% window CloseRequestFcn so both paths behave identically.
+%
+% WHY THE ORDER MATTERS
+% The old version called stop() immediately followed by delete() on T1/T2,
+% straight from the button callback. delete() on a timer whose TimerFcn is
+% still executing BLOCKS — and T1 is a 0.25 s fixedRate timer whose callback
+% (two cbmex reads, plus a growing `trials(end+1)` copy) can take longer than
+% 0.25 s late in a session. Once that happens T1 saturates the callback queue
+% and never goes idle, so delete(T1) waits forever. That is the freeze.
+%
+% The fix is: stop() first (no new callbacks queue), then drain with a hard
+% time bound, then delete ONLY if the timer has actually gone idle. A timer
+% that is still busy is left stopped and reaped asynchronously, so this
+% function always returns and the GUI always comes back.
+
     ud = fig.UserData;
+    if ud.closing
+        return   % re-entrancy / double-click guard
+    end
+    ud.closing = true;
+    fig.UserData = ud;
 
-    % Stop acquisition timers
-    stopTimers(ud);
+    % Immediate feedback, and lock out both buttons for the duration.
+    if restoreUI
+        hStatus.Text      = 'Stopping...';
+        hStatus.FontColor = [0.85 0.55 0.10];
+        if isfield(ud, 'closeBtn') && isvalid(ud.closeBtn); ud.closeBtn.Enable = 'off'; end
+        if isfield(ud, 'startBtn') && isvalid(ud.startBtn); ud.startBtn.Enable = 'off'; end
+        drawnow limitrate
+    end
 
-    % Close cbmex
-    try; cbmex('trialconfig', 0); catch; end
-    try; cbmex('close');          catch; end
+    % Whatever happens below, hand the GUI back in a usable state.
+    if restoreUI
+        guard = onCleanup(@() restoreAfterClose(fig, hStatus));
+    end
 
-    % Close log file handles before clearing globals
+    tAll = tic;
+
+    % 1. Stop the UI refresh timer so it cannot fire mid-teardown.
+    if ~isempty(ud.T_ui) && isvalid(ud.T_ui); stop(ud.T_ui); end
+
+    % 2. Stop acquisition timers WITHOUT deleting them yet — this prevents any
+    %    further callbacks from being queued.
+    tTim = tic;
+    for fn = {'T1', 'T2'}
+        t = ud.(fn{1});
+        if ~isempty(t) && isvalid(t); stop(t); end
+    end
+
+    % 3. Drain, with a hard time bound. drawnow (callbacks allowed) lets the
+    %    in-flight callback finish and the queue flush.
+    DRAIN_LIMIT = 3;                       % seconds
+    tDrain = tic;
+    while toc(tDrain) < DRAIN_LIMIT && anyTimerBusy(ud)
+        drawnow limitrate
+    end
+    stillBusy = anyTimerBusy(ud);
+
+    % 4. Delete ONLY timers that have actually gone idle — delete() on a busy
+    %    timer blocks indefinitely, which is the bug being fixed. Anything
+    %    still busy is left stopped and reaped asynchronously below.
+    stale = {};
+    for fn = {'T1', 'T2'}
+        t = ud.(fn{1});
+        if isempty(t) || ~isvalid(t); continue; end
+        if strcmp(t.Running, 'off')
+            delete(t);
+        else
+            stale{end+1} = t; %#ok<AGROW>
+        end
+    end
+    if ~isempty(stale)
+        fprintf(['[Close] WARNING: %d timer(s) still executing after %g s. Left ' ...
+                 'stopped; will be reaped in the background. This means a T1/T2 ' ...
+                 'callback is taking longer than its period.\n'], numel(stale), DRAIN_LIMIT);
+        reaper = timer('Name','Jives_Reaper','StartDelay',5,'ExecutionMode','singleShot', ...
+                       'TimerFcn', @(t,~) reapStaleTimers(stale, t));
+        start(reaper);
+    end
+    tTimers = toc(tTim);
+
+    % 5. Close cbmex. Skipped if a callback is still in flight — calling
+    %    cbmex('close') underneath a live cbmex read can wedge the MEX.
+    tCb = tic;
+    if stillBusy
+        fprintf('[Close] WARNING: skipping cbmex close — a callback is still in flight.\n');
+        fprintf('[Close] Run CloseEverything.m once the warning above stops appearing.\n');
+    else
+        try; cbmex('trialconfig', 0); catch; end
+        try; cbmex('close');          catch; end
+    end
+    tCbmex = toc(tCb);
+
+    % 6. Close log file handles before clearing globals
+    tF = tic;
     global fhComments fhTrials fhSpikes
     if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
     if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
     if ~isempty(fhSpikes)   && fhSpikes   > 0; fclose(fhSpikes);   fhSpikes   = []; end
+    tFiles = toc(tF);
 
-    % Clear globals
-    global trials inTrial
-    trials  = struct([]);
-    inTrial = false;
+    % 7. Clear globals
+    tC = tic;
+    % `trials` and its companions must be cleared together — the plots rely on
+    % tsum.n == numel(trials) == numel(spikeTrials), and leaving any of them
+    % populated would carry data into the next session.
+    global trials inTrial spikeTrials tsum spikeNCh spikeNUnits
+    trials      = struct([]);
+    inTrial     = false;
+    spikeTrials = [];
+    tsum        = [];
+    spikeNCh    = [];
+    spikeNUnits = [];
 
-    % Clear persistent variables in all pipeline functions
+    % 8. Clear persistent variables in all pipeline functions. Safe here
+    %    because none of these functions is on the call stack any more.
     clear getJivesData
     clear jivesAnalysisSwitchyard
     clear plotJivesDashboard
@@ -240,40 +372,99 @@ function onCloseAll(fig, hStatus)
     clear plotJivesFixation
     clear plotJivesVisualSaccade
     clear plotJivesReceptiveField
+    tClear = toc(tC);
 
+    ud = fig.UserData;
     ud.T1      = [];
     ud.T2      = [];
     ud.running = false;
     fig.UserData = ud;
 
-    % Re-enable Start and reset task field
-    ud.startBtn.Enable  = 'on';
-    ud.hTask.Value      = 'Waiting for task info...';
-    ud.hTask.FontColor  = [0.4 0.4 0.4];
+    fprintf(['[Close] total %.2f s  (timers %.2f, cbmex %.2f, files %.2f, ' ...
+             'clear %.2f) — all connections closed and state cleared.\n'], ...
+            toc(tAll), tTimers, tCbmex, tFiles, tClear);
+end
 
-    hStatus.Text      = 'Stopped';
-    hStatus.FontColor = [0.7 0.1 0.1];
+%% =========================================================================
 
-    fprintf('All connections closed and state cleared.\n');
+function tf = anyTimerBusy(ud)
+% True if T1 or T2 is still executing its TimerFcn.
+    tf = false;
+    for fn = {'T1', 'T2'}
+        t = ud.(fn{1});
+        if ~isempty(t) && isvalid(t) && strcmp(t.Running, 'on'); tf = true; return; end
+    end
+end
+
+%% =========================================================================
+
+function reapStaleTimers(stale, self)
+% Delete timers that were still executing at shutdown, once they go idle.
+% Reschedules itself rather than blocking, so it can never hang the session.
+    remaining = {};
+    for k = 1:numel(stale)
+        t = stale{k};
+        if ~isvalid(t); continue; end
+        if strcmp(t.Running, 'off')
+            delete(t);
+        else
+            remaining{end+1} = t; %#ok<AGROW>
+        end
+    end
+    if isempty(remaining)
+        fprintf('[Close] stale timers reaped.\n');
+        delete(self);
+    else
+        next = timer('Name','Jives_Reaper','StartDelay',5,'ExecutionMode','singleShot', ...
+                     'TimerFcn', @(t,~) reapStaleTimers(remaining, t));
+        start(next);
+        delete(self);
+    end
+end
+
+%% =========================================================================
+
+function restoreAfterClose(fig, hStatus)
+% Return the GUI to the idle state. Runs via onCleanup so it executes even if
+% shutdownPipeline errors partway through — a bad close must never leave the
+% window wedged with both buttons disabled.
+    if ~isvalid(fig); return; end
+    ud = fig.UserData;
+    ud.closing  = false;
+    ud.running  = false;
+    ud.starting = false;
+    fig.UserData = ud;
+
+    if isfield(ud, 'startBtn') && isvalid(ud.startBtn); ud.startBtn.Enable = 'on';  end
+    if isfield(ud, 'closeBtn') && isvalid(ud.closeBtn); ud.closeBtn.Enable = 'on';  end
+    if isfield(ud, 'hTask')    && isvalid(ud.hTask)
+        ud.hTask.Value     = 'Waiting for task info...';
+        ud.hTask.FontColor = [0.4 0.4 0.4];
+    end
+    if ~isempty(ud.T_ui) && isvalid(ud.T_ui) && strcmp(ud.T_ui.Running, 'off')
+        start(ud.T_ui);   % resume label refresh for the next session
+    end
+    if isvalid(hStatus)
+        hStatus.Text      = 'Stopped';
+        hStatus.FontColor = [0.7 0.1 0.1];
+    end
 end
 
 %% =========================================================================
 
 function onCloseWindow(fig)
     ud = fig.UserData;
-    % Stop UI timer
+    % Tear down acquisition through the same path as the Close All button.
+    % restoreUI = false: the window is going away, so there is nothing to
+    % re-enable afterwards.
+    if ud.running
+        shutdownPipeline(fig, [], false);
+    end
+    % Stop UI timer last — it reads fig.UserData, so it must outlive the
+    % teardown but not the figure.
+    ud = fig.UserData;
     if ~isempty(ud.T_ui) && isvalid(ud.T_ui)
         stop(ud.T_ui); delete(ud.T_ui);
-    end
-    % Stop acquisition if still running
-    if ud.running
-        stopTimers(ud);
-        try; cbmex('trialconfig', 0); catch; end
-        try; cbmex('close');          catch; end
-        global fhComments fhTrials fhSpikes
-        if ~isempty(fhComments) && fhComments > 0; fclose(fhComments); fhComments = []; end
-        if ~isempty(fhTrials)   && fhTrials   > 0; fclose(fhTrials);   fhTrials   = []; end
-        if ~isempty(fhSpikes)   && fhSpikes   > 0; fclose(fhSpikes);   fhSpikes   = []; end
     end
     delete(fig);
 end
@@ -282,8 +473,11 @@ end
 
 function updateLabels(fig, hStatus, hTrials, hTask)
     global trials
-    ud = fig.UserData;
+    % Validity check MUST come before touching UserData — this runs from a
+    % timer, so the figure can be deleted between ticks.
     if ~isvalid(fig); return; end
+    ud = fig.UserData;
+    if ud.closing || ud.starting; return; end   % teardown/startup owns the labels
 
     if ud.running
         hStatus.Text      = 'Running';
@@ -295,23 +489,13 @@ function updateLabels(fig, hStatus, hTrials, hTask)
 
         % Update task field from most recent trial
         taskStr = trials(end).Task;
-        if ~isempty(taskStr) && ~strcmp(hTask.Value, taskStr)
-            hTask.Value     = taskStr;
+        if (ischar(taskStr) || isstring(taskStr)) && ~isempty(taskStr) && ...
+                ~strcmp(hTask.Value, char(taskStr))
+            hTask.Value     = char(taskStr);
             hTask.FontColor = [0 0 0];
         end
     else
         hTrials.Text = '0';
-    end
-end
-
-%% =========================================================================
-
-function stopTimers(ud)
-    for fn = {'T1', 'T2'}
-        t = ud.(fn{1});
-        if ~isempty(t) && isvalid(t)
-            stop(t); delete(t);
-        end
     end
 end
 

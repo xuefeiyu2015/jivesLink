@@ -55,6 +55,16 @@ inTrial = false;
 global trials;
 trials =struct([]);
 
+% Companions to `trials`, appended in lockstep by getJivesData:
+%   spikeTrials  per-trial flat spike arrays (.ts/.ch/.unit)
+%   tsum         preallocated numeric mirror read by the dashboard/psychometrics
+%   spikeNCh/spikeNUnits  spike-buffer dimensions; size the RF dropdowns
+global spikeTrials tsum spikeNCh spikeNUnits;
+spikeTrials = [];
+tsum        = [];
+spikeNCh    = [];
+spikeNUnits = [];
+
 global fhComments fhTrials fhSpikes;
 dtStr       = datestr(now, 'yyyymmdd_HHMMSS');
 commentFile = ['comments_' dtStr '.txt'];
@@ -63,7 +73,8 @@ spikeFile   = ['spikes_ch1_' dtStr '.txt'];
 fhComments  = fopen(commentFile, 'w');
 fhTrials    = fopen(trialFile,   'w');
 fhSpikes    = fopen(spikeFile,   'w');   % channel-1 unit-1/unit-2 spike timings
-fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_point_off\n');
+% 18 columns — must match the fprintf in getJivesData exactly.
+fprintf(fhTrials, 'Trial_number,Task,Trial_type,Start,End,Trialoutcome,Choiceoutcome,Choosen_choice,Choicetime,Target_1_presented,Target_2_presented,Target_1_pos_x,Target_1_pos_y,Target_2_pos_x,Target_2_pos_y,Requested_target_2_time_offset,Fixation_exited,Fixation_point_off\n');
 fprintf('[Export] comments → %s\n', fullfile(pwd, commentFile));
 fprintf('[Export] trials   → %s\n', fullfile(pwd, trialFile));
 fprintf('[Export] spikes   → %s\n', fullfile(pwd, spikeFile));
@@ -72,13 +83,13 @@ fprintf('[Export] spikes   → %s\n', fullfile(pwd, spikeFile));
 % appends directly to global `trials`; jivesAnalysisSwitchyard reads it.
 T1 = timer('Name',          'Jives_Acquire', ...
            'Period',         0.25, ...
-           'ExecutionMode', 'fixedRate', ...
+           'ExecutionMode', 'fixedSpacing', ...
            'TimerFcn',       'getJivesData();', ...           % REVISED
            'ErrorFcn',       @(~,e) fprintf('[T1 error] %s\n', e.Data.message));
 
 T2 = timer('Name',          'Jives_Plot', ...
            'Period',         1.0, ...
-           'ExecutionMode', 'fixedRate', ...
+           'ExecutionMode', 'fixedSpacing', ...
            'TimerFcn',       'jivesAnalysisSwitchyard();', ... % REVISED
            'ErrorFcn',       @(~,e) fprintf('[T2 error] %s\n', e.Data.message));
 
