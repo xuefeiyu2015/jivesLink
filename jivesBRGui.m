@@ -155,19 +155,14 @@ function onStart(fig, hStart, hStatus)
     % Connect cbmex BEFORE opening any log files, so a failed connect cannot
     % leak file handles or leave empty files on disk.
     try
-        % Drop any half-open socket left by a previous session. Without this,
-        % cbmex('open') sits on a connect timeout after an unclean shutdown —
-        % the main reason Start feels slow on the second and later runs.
-        try; cbmex('close'); catch; end
-        cbmex('open')
-        cbmex('trialconfig', 1, 'double', 'absolute', 'comment', 200)
+        cbmexConnect(200);   % also pings the NSP: fails if Central is not open
     catch ME
         ud.starting = false;
         fig.UserData = ud;
         hStart.Enable     = 'on';
         hStatus.Text      = 'Stopped';
         hStatus.FontColor = [0.7 0.1 0.1];
-        uialert(fig, ME.message, 'cbmex error');
+        uialert(fig, ME.message, 'Central not ready');
         return
     end
 
@@ -218,7 +213,7 @@ function onStart(fig, hStart, hStatus)
     % returns, so an overrun self-limits instead of compounding.
     T1 = timer('Name', 'Jives_Acquire', 'Period', 0.25, 'ExecutionMode', 'fixedSpacing', ...
                'TimerFcn', 'getJivesData();', ...            % REVISED
-               'ErrorFcn', @(~,e) fprintf('[T1 error] %s\n', e.Data.message));
+               'ErrorFcn', @(~,e) onAcquireError(fig, e));
 
     % REVISED: T2 switchyard takes no argument — reads global `trials` directly.
     T2 = timer('Name', 'Jives_Plot', 'Period', 1.0, 'ExecutionMode', 'fixedSpacing', ...
@@ -240,6 +235,18 @@ function onStart(fig, hStart, hStatus)
 end
 
 %% =========================================================================
+
+function onAcquireError(fig, e)
+% T1 ErrorFcn. The timer has already stopped, so acquisition is dead until
+% restart — say so in a pop-up instead of only on the command line.
+    fprintf('[T1 error] %s\n', e.Data.message);
+    if isvalid(fig)
+        uialert(fig, sprintf(['Acquisition stopped:\n%s\n\n' ...
+            'If Central was closed or the NSP disconnected, reopen Central, ' ...
+            'then press Close All and Start again.'], e.Data.message), ...
+            'Acquisition error');
+    end
+end
 
 function onCloseAll(fig, hStatus)
     shutdownPipeline(fig, hStatus, true);

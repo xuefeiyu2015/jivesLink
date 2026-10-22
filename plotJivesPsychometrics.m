@@ -23,8 +23,13 @@ function plotJivesPsychometrics(nFig)
 % period, stepped by one trial. While the period has k < N_WIN trials the
 % window grows (1..k); after that it is (k-N_WIN+1)..k. x = valid-trial count
 % since the last Clear, so successive periods sit side by side.
+%
+% Stay toggle (default ON): when the session returns to this task after
+% running another one, Stay ON keeps plotting on the same figure; Stay OFF
+% freezes the old figure (left open, controls disabled) and opens a new one,
+% figure nFig + 100*(block-1), holding only the trials from the return onward.
 
-global tsum
+global tsum trials
 
 N_WIN = 100;   % bias/threshold sliding-window length (valid trials)
 
@@ -32,14 +37,39 @@ if isempty(tsum) || tsum.n < 2; return; end
 
 %try
  %initialization
-persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 htxt ...
+persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 legH htot ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R ...
            rtlast_L rtlast_R rtx_L rtx_R pPrev optz ...
-           ax2 ax3 bhAll thAll frozenH pWin;
+           ax2 ax3 bhAll thAll frozenH pWin ...
+           lastSeenN block stayDefault;
+if isempty(block);       block = 1;          end
+if isempty(stayDefault); stayDefault = true; end   % psychometric: Stay on by default
+if ~isempty(fig2) && isvalid(fig2); stayDefault = fig2.UserData.stay; end
+
+% --- Returned to this task after another one? (Stay off -> new figure) ---
+% Only the trials since the last call are scanned; a trial with an empty
+% Task (dropped comment) never counts as a switch.
+newBlockOffset = [];
+nNow = numel(trials);
+if ~isempty(lastSeenN) && nNow > lastSeenN
+    g = lastForeignTrial(trials, lastSeenN + 1, nNow, @(t) ~contains(t, 'time'));
+    if ~isempty(g) && ~stayDefault
+        if ~isempty(fig2) && isvalid(fig2)
+            freezeFigure(fig2, sprintf('Psychometric — block %d (frozen)', block));
+            block = block + 1;
+        end
+        fig2 = [];
+        newBlockOffset = g;      % new figure starts at the first returning trial
+    end
+end
+lastSeenN = nNow;
+
 if isempty(fig2) || ~isvalid(fig2)
-    fig2 = figure(nFig);
+    fig2 = figure(nFig + 100*(block-1));
+    fig2.Name = sprintf('Psychometric — block %d', block);
     fig2.UserData = struct('trialOffset', 0, 'doClear', false, ...
-        'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0);
+        'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0, ...
+        'corrBase', 0, 'nCorrLive', 0, 'stay', stayDefault);
     c1 = periodColor(1);
 
     ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
@@ -63,12 +93,17 @@ if isempty(fig2) || ~isvalid(fig2)
     ylabel('Proprotion');
     title('Psychometric function', 'FontSize', 15);
 
-    % Persistent text annotation — updated in-place each tick
-    htxt = text(ax1, 0.98, 0.05, '', ...
-        'Units', 'normalized', ...
-        'HorizontalAlignment', 'right', ...
-        'VerticalAlignment', 'bottom', ...
-        'FontSize', 11, 'Color', c1);
+    % Segment legend (top-left, where P(right) ~ 0 leaves the axes empty):
+    % one row per superimposed segment, each backed by an invisible proxy
+    % line so a segment gets a row even if it never produced a valid fit.
+    legH = segmentProxy(ax1, c1, segmentLabel(1, 0, 0, NaN, NaN, true));
+    buildSegLegend(ax1, legH);
+
+    % Running total over all segments since the last Clear (= sum of the
+    % legend rows), gray, bottom-right — empty because P(right) ~ 1 there.
+    htot = text(ax1, 0.98, 0.04, '', 'Units', 'normalized', ...
+        'HorizontalAlignment', 'right', 'VerticalAlignment', 'bottom', ...
+        'FontName', 'FixedWidth', 'FontSize', 10, 'Color', [0.5 0.5 0.5]);
 
     ax2 = subplot(4,2,5,'Parent',fig2);
     box off
@@ -115,6 +150,14 @@ if isempty(fig2) || ~isvalid(fig2)
     rtxt_R  = text(ax_rtR, 0.98, 0.95, '', 'Units','normalized', ...
         'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
 
+    % Stay toggle — see header. Only stores its state; acted on at the next
+    % return to this task.
+    uicontrol(fig2, 'Style', 'togglebutton', 'Units', 'normalized', ...
+        'Position', [0.58, 0.965, 0.12, 0.030], ...
+        'String', 'Stay', 'FontSize', 10, 'Value', stayDefault, ...
+        'BackgroundColor', stayColor(stayDefault), 'ForegroundColor', [1 1 1], ...
+        'Callback', @onStayToggle);
+
     % Superimpose + Clear buttons — top-right corner. Each sets a flag and
     % re-invokes this function so the action shows immediately rather than
     % waiting for the next trial.
@@ -132,6 +175,13 @@ if isempty(fig2) || ~isvalid(fig2)
     time_count = 0;
 end
 
+% --- New block after a task switch: plot only the returning trials ---
+if ~isempty(newBlockOffset)
+    fig2.UserData.trialOffset = newBlockOffset;
+    pPrev = [];
+    pWin  = [];
+end
+
 % --- Handle clear request: drop every period, restart at color 1 ---
 if fig2.UserData.doClear
     fig2.UserData.trialOffset   = tsum.n;
@@ -140,6 +190,9 @@ if fig2.UserData.doClear
     fig2.UserData.period        = 1;
     fig2.UserData.xBase         = 0;
     fig2.UserData.nDone         = 0;
+    fig2.UserData.corrBase      = 0;
+    fig2.UserData.nCorrLive     = 0;
+    htot.String = '';
     time_count = 0;
     pPrev      = [];      % drop the warm-start seeds with the data they came from
     pWin       = [];
@@ -148,12 +201,14 @@ if fig2.UserData.doClear
     delete(oldLines(isgraphics(oldLines)));
     [bhandle, thandle] = newBiasLines(ax2, ax3, periodColor(1));
     bhAll = bhandle;  thAll = thandle;
+    delete(legH(isgraphics(legH)));
+    legH = segmentProxy(ax1, periodColor(1), segmentLabel(1, 0, 0, NaN, NaN, true));
+    buildSegLegend(ax1, legH);
     recolorLive(periodColor(1), [dhandle dlast rtdot_L rtx_L rtdot_R rtx_R], ...
-        [nFit rtfit_L rtfit_R], htxt);
+        [nFit rtfit_L rtfit_R]);
     blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
     blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
     blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
-    htxt.String = '';
     drawnow;
     return;
 end
@@ -173,6 +228,8 @@ if fig2.UserData.doSuperimpose
             xline(ax3, xb + 0.5, '--', 'Color', [0.6 0.6 0.6], 'HandleVisibility', 'off')];
 
         fig2.UserData.xBase       = xb;
+        fig2.UserData.corrBase    = fig2.UserData.corrBase + fig2.UserData.nCorrLive;
+        fig2.UserData.nCorrLive   = 0;
         fig2.UserData.period      = fig2.UserData.period + 1;
         fig2.UserData.trialOffset = tsum.n;
         fig2.UserData.nDone       = 0;
@@ -183,12 +240,17 @@ if fig2.UserData.doSuperimpose
         cNew = periodColor(fig2.UserData.period);
         [bhandle, thandle] = newBiasLines(ax2, ax3, cNew);
         bhAll(end+1) = bhandle;  thAll(end+1) = thandle;
+        % Freeze the finished segment's legend row (drop the live marker) and
+        % add a row for the new one.
+        legH(end).DisplayName = strrep(legH(end).DisplayName, '*', ' ');
+        legH(end+1) = segmentProxy(ax1, cNew, ...
+            segmentLabel(fig2.UserData.period, 0, 0, NaN, NaN, true));
+        buildSegLegend(ax1, legH);
         recolorLive(cNew, [dhandle dlast rtdot_L rtx_L rtdot_R rtx_R], ...
-            [nFit rtfit_L rtfit_R], htxt);
+            [nFit rtfit_L rtfit_R]);
         blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
         blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
         blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
-        htxt.String = '';
         drawnow limitrate;
     end
     return;
@@ -328,12 +390,15 @@ if ~isempty(xx)
     addpoints( nFit, xx ,yy);
 end
 
-% Update annotation in-place — no accumulation, no axis-targeting issues
-if validFit
-    htxt.String = sprintf('PSE = %.1f ms\nThresh = %.1f ms\nN = %d', pse, threshold, TotalTrials);
-else
-    htxt.String = sprintf('collecting data...\nN = %d', TotalTrials);
-end
+% Live segment's legend row: choice trials / correct (outcome bit 1, set by
+% outcomeMask in getJivesData), PSE and threshold of the cumulative fit
+nCorrect = sum(bitand(tsum.outcome(vIdx), uint8(1)) > 0);
+legH(end).DisplayName = segmentLabel(fig2.UserData.period, TotalTrials, ...
+    nCorrect, pse, threshold, true);
+% Totals across segments: frozen segments (xBase / corrBase) + live one
+fig2.UserData.nCorrLive = nCorrect;
+htot.String = sprintf('Total N/Corr  %d/%d', ...
+    fig2.UserData.xBase + TotalTrials, fig2.UserData.corrBase + nCorrect);
 
 
 % --- Bias / Threshold: sliding window of N_WIN valid trials, step 1 ---
@@ -447,6 +512,38 @@ function requestPsychAction(fig, flag, nFig)
     end
 end
 
+function onStayToggle(h, ~)
+% Stay toggle callback: store the state on the figure and recolor the button.
+    fig = ancestor(h, 'figure');
+    fig.UserData.stay = logical(h.Value);
+    h.BackgroundColor = stayColor(h.Value);
+end
+
+function c = stayColor(on)
+% Green when Stay is pressed, gray when released.
+if on; c = [0.3 0.7 0.4]; else; c = [0.6 0.6 0.6]; end
+end
+
+function freezeFigure(fig, name)
+% Leave a finished block's figure on screen but inert: its buttons would
+% otherwise drive the persistent state that now belongs to the new figure.
+set(findall(fig, 'Type', 'uicontrol'), 'Enable', 'off');
+fig.Name = name;
+end
+
+function g = lastForeignTrial(trials, i0, i1, isForeign)
+% Index of the last trial in i0..i1 whose (non-empty) Task satisfies
+% isForeign, or [] if none. Scans backwards so it stops at the first hit.
+g = [];
+for n = i1:-1:i0
+    t = trials(n).Task;
+    if ~isempty(t) && isForeign(t)
+        g = n;
+        return;
+    end
+end
+end
+
 function c = periodColor(k)
 % Color of period k. Period 1 is the original red; cycles after 6 periods.
 PALETTE = [0.85 0.10 0.10;    % red
@@ -464,13 +561,42 @@ bh = animatedline(ax2, 'Color', c, 'Marker', '.', 'LineStyle', '-', 'DisplayName
 th = animatedline(ax3, 'Color', c, 'Marker', '.', 'LineStyle', '-', 'DisplayName', 'Threshold');
 end
 
-function recolorLive(c, scatters, alines, txt)
+function recolorLive(c, scatters, alines)
 % Point the live (current-period) objects at period color c. CData drives the
 % fill of 'filled' scatters and the edge of 'x' scatters; black edges/rings
 % set explicitly are untouched.
 set(scatters, 'CData', c);
 set(alines, 'Color', c);
-txt.Color = c;
+end
+
+function h = segmentProxy(ax, c, label)
+% Invisible (NaN) line that only exists to give a segment its legend row.
+h = line(ax, NaN, NaN, 'Color', c, 'LineWidth', 2.5, 'DisplayName', label);
+end
+
+function lg = buildSegLegend(ax, legH)
+% (Re)build the segment legend from the proxies. Fixed-width font keeps the
+% columns aligned with the title row; no box so it never hides data behind it;
+% AutoUpdate off so later plotted objects (frozen copies etc.) are not added.
+% Newest (live) segment first, so it always sits right under the header.
+lg = legend(ax, flip(legH), 'Location', 'northwest', 'Box', 'off', ...
+    'FontName', 'FixedWidth', 'FontSize', 9, 'Interpreter', 'none', ...
+    'AutoUpdate', 'off');
+lg.Title.String     = sprintf('%-3s %9s %8s %8s', 'Seg', 'N/Corr', 'PSE(ms)', 'Thr(ms)');
+lg.Title.FontName   = 'FixedWidth';
+lg.Title.FontWeight = 'normal';
+end
+
+function s = segmentLabel(k, nChoice, nCorrect, pse, thr, isLive)
+% One legend row: segment k (live one marked '*'), choice trials / correct,
+% PSE and threshold of the segment's cumulative fit ('--' when no valid fit).
+if isLive; mark = '*'; else; mark = ' '; end
+s = sprintf('S%d%s %9s %8s %8s', k, mark, sprintf('%d/%d', nChoice, nCorrect), ...
+    fmtFit(pse), fmtFit(thr));
+end
+
+function s = fmtFit(v)
+if isfinite(v); s = sprintf('%.1f', v); else; s = '--'; end
 end
 
 function h = freezePeriod(c, scatters, alines)

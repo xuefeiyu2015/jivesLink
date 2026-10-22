@@ -42,10 +42,13 @@ close all;
 dbstop if error
 
 %% Connect
-cbmex('open')
-% 'comment', 200 — comment buffer size 
-cbmex('trialconfig', 1, 'double', 'absolute', 'comment', 50)
-%cbmex('trialconfig', 1, 'double', 'absolute');
+% Opens cbmex and pings the NSP; 50 = comment buffer size.
+try
+    cbmexConnect(50);
+catch ME
+    errordlg(ME.message, 'Central not ready', 'modal');
+    return
+end
 
 %% Timers
 %% Global state
@@ -85,7 +88,9 @@ T1 = timer('Name',          'Jives_Acquire', ...
            'Period',         0.25, ...
            'ExecutionMode', 'fixedSpacing', ...
            'TimerFcn',       'getJivesData();', ...           % REVISED
-           'ErrorFcn',       @(~,e) fprintf('[T1 error] %s\n', e.Data.message));
+           'ErrorFcn',       @(~,e) errordlg(sprintf(['Acquisition stopped:\n%s\n\n' ...
+               'If Central was closed or the NSP disconnected, reopen Central ' ...
+               'and rerun jivesBROnline.'], e.Data.message), 'Acquisition error'));
 
 T2 = timer('Name',          'Jives_Plot', ...
            'Period',         1.0, ...
