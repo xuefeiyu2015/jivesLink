@@ -23,8 +23,13 @@ function plotJivesPsychometrics(nFig)
 % period, stepped by one trial. While the period has k < N_WIN trials the
 % window grows (1..k); after that it is (k-N_WIN+1)..k. x = valid-trial count
 % since the last Clear, so successive periods sit side by side.
+%
+% Stay toggle (default ON): when the session returns to this task after
+% running another one, Stay ON keeps plotting on the same figure; Stay OFF
+% freezes the old figure (left open, controls disabled) and opens a new one,
+% figure nFig + 100*(block-1), holding only the trials from the return onward.
 
-global tsum
+global tsum trials
 
 N_WIN = 100;   % bias/threshold sliding-window length (valid trials)
 
@@ -35,11 +40,36 @@ if isempty(tsum) || tsum.n < 2; return; end
 persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 htxt ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R ...
            rtlast_L rtlast_R rtx_L rtx_R pPrev optz ...
-           ax2 ax3 bhAll thAll frozenH pWin;
+           ax2 ax3 bhAll thAll frozenH pWin ...
+           lastSeenN block stayDefault;
+if isempty(block);       block = 1;          end
+if isempty(stayDefault); stayDefault = true; end   % psychometric: Stay on by default
+if ~isempty(fig2) && isvalid(fig2); stayDefault = fig2.UserData.stay; end
+
+% --- Returned to this task after another one? (Stay off -> new figure) ---
+% Only the trials since the last call are scanned; a trial with an empty
+% Task (dropped comment) never counts as a switch.
+newBlockOffset = [];
+nNow = numel(trials);
+if ~isempty(lastSeenN) && nNow > lastSeenN
+    g = lastForeignTrial(trials, lastSeenN + 1, nNow, @(t) ~contains(t, 'time'));
+    if ~isempty(g) && ~stayDefault
+        if ~isempty(fig2) && isvalid(fig2)
+            freezeFigure(fig2, sprintf('Psychometric — block %d (frozen)', block));
+            block = block + 1;
+        end
+        fig2 = [];
+        newBlockOffset = g;      % new figure starts at the first returning trial
+    end
+end
+lastSeenN = nNow;
+
 if isempty(fig2) || ~isvalid(fig2)
-    fig2 = figure(nFig);
+    fig2 = figure(nFig + 100*(block-1));
+    fig2.Name = sprintf('Psychometric — block %d', block);
     fig2.UserData = struct('trialOffset', 0, 'doClear', false, ...
-        'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0);
+        'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0, ...
+        'stay', stayDefault);
     c1 = periodColor(1);
 
     ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
@@ -115,6 +145,14 @@ if isempty(fig2) || ~isvalid(fig2)
     rtxt_R  = text(ax_rtR, 0.98, 0.95, '', 'Units','normalized', ...
         'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
 
+    % Stay toggle — see header. Only stores its state; acted on at the next
+    % return to this task.
+    uicontrol(fig2, 'Style', 'togglebutton', 'Units', 'normalized', ...
+        'Position', [0.58, 0.965, 0.12, 0.030], ...
+        'String', 'Stay', 'FontSize', 10, 'Value', stayDefault, ...
+        'BackgroundColor', stayColor(stayDefault), 'ForegroundColor', [1 1 1], ...
+        'Callback', @onStayToggle);
+
     % Superimpose + Clear buttons — top-right corner. Each sets a flag and
     % re-invokes this function so the action shows immediately rather than
     % waiting for the next trial.
@@ -130,6 +168,13 @@ if isempty(fig2) || ~isvalid(fig2)
         'Callback', @(~,~) requestPsychAction(fig2, 'doClear', nFig));
 
     time_count = 0;
+end
+
+% --- New block after a task switch: plot only the returning trials ---
+if ~isempty(newBlockOffset)
+    fig2.UserData.trialOffset = newBlockOffset;
+    pPrev = [];
+    pWin  = [];
 end
 
 % --- Handle clear request: drop every period, restart at color 1 ---
@@ -445,6 +490,38 @@ function requestPsychAction(fig, flag, nFig)
         fig.UserData.(flag) = true;
         plotJivesPsychometrics(nFig);
     end
+end
+
+function onStayToggle(h, ~)
+% Stay toggle callback: store the state on the figure and recolor the button.
+    fig = ancestor(h, 'figure');
+    fig.UserData.stay = logical(h.Value);
+    h.BackgroundColor = stayColor(h.Value);
+end
+
+function c = stayColor(on)
+% Green when Stay is pressed, gray when released.
+if on; c = [0.3 0.7 0.4]; else; c = [0.6 0.6 0.6]; end
+end
+
+function freezeFigure(fig, name)
+% Leave a finished block's figure on screen but inert: its buttons would
+% otherwise drive the persistent state that now belongs to the new figure.
+set(findall(fig, 'Type', 'uicontrol'), 'Enable', 'off');
+fig.Name = name;
+end
+
+function g = lastForeignTrial(trials, i0, i1, isForeign)
+% Index of the last trial in i0..i1 whose (non-empty) Task satisfies
+% isForeign, or [] if none. Scans backwards so it stops at the first hit.
+g = [];
+for n = i1:-1:i0
+    t = trials(n).Task;
+    if ~isempty(t) && isForeign(t)
+        g = n;
+        return;
+    end
+end
 end
 
 function c = periodColor(k)
