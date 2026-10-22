@@ -37,7 +37,7 @@ if isempty(tsum) || tsum.n < 2; return; end
 
 %try
  %initialization
-persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 legH ...
+persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 legH htot ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R ...
            rtlast_L rtlast_R rtx_L rtx_R pPrev optz ...
            ax2 ax3 bhAll thAll frozenH pWin ...
@@ -69,7 +69,7 @@ if isempty(fig2) || ~isvalid(fig2)
     fig2.Name = sprintf('Psychometric — block %d', block);
     fig2.UserData = struct('trialOffset', 0, 'doClear', false, ...
         'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0, ...
-        'stay', stayDefault);
+        'corrBase', 0, 'nCorrLive', 0, 'stay', stayDefault);
     c1 = periodColor(1);
 
     ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
@@ -98,6 +98,12 @@ if isempty(fig2) || ~isvalid(fig2)
     % line so a segment gets a row even if it never produced a valid fit.
     legH = segmentProxy(ax1, c1, segmentLabel(1, 0, 0, NaN, NaN, true));
     buildSegLegend(ax1, legH);
+
+    % Running total over all segments since the last Clear (= sum of the
+    % legend rows), gray, bottom-right — empty because P(right) ~ 1 there.
+    htot = text(ax1, 0.98, 0.04, '', 'Units', 'normalized', ...
+        'HorizontalAlignment', 'right', 'VerticalAlignment', 'bottom', ...
+        'FontName', 'FixedWidth', 'FontSize', 10, 'Color', [0.5 0.5 0.5]);
 
     ax2 = subplot(4,2,5,'Parent',fig2);
     box off
@@ -184,6 +190,9 @@ if fig2.UserData.doClear
     fig2.UserData.period        = 1;
     fig2.UserData.xBase         = 0;
     fig2.UserData.nDone         = 0;
+    fig2.UserData.corrBase      = 0;
+    fig2.UserData.nCorrLive     = 0;
+    htot.String = '';
     time_count = 0;
     pPrev      = [];      % drop the warm-start seeds with the data they came from
     pWin       = [];
@@ -219,6 +228,8 @@ if fig2.UserData.doSuperimpose
             xline(ax3, xb + 0.5, '--', 'Color', [0.6 0.6 0.6], 'HandleVisibility', 'off')];
 
         fig2.UserData.xBase       = xb;
+        fig2.UserData.corrBase    = fig2.UserData.corrBase + fig2.UserData.nCorrLive;
+        fig2.UserData.nCorrLive   = 0;
         fig2.UserData.period      = fig2.UserData.period + 1;
         fig2.UserData.trialOffset = tsum.n;
         fig2.UserData.nDone       = 0;
@@ -384,6 +395,10 @@ end
 nCorrect = sum(bitand(tsum.outcome(vIdx), uint8(1)) > 0);
 legH(end).DisplayName = segmentLabel(fig2.UserData.period, TotalTrials, ...
     nCorrect, pse, threshold, true);
+% Totals across segments: frozen segments (xBase / corrBase) + live one
+fig2.UserData.nCorrLive = nCorrect;
+htot.String = sprintf('Total N/Corr  %d/%d', ...
+    fig2.UserData.xBase + TotalTrials, fig2.UserData.corrBase + nCorrect);
 
 
 % --- Bias / Threshold: sliding window of N_WIN valid trials, step 1 ---
