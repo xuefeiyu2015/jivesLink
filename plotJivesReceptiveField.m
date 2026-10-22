@@ -55,7 +55,8 @@ persistent fig hChDD hUnitDD hRFt0 hRFt1 hPSTHt0 hPSTHt1 hAlignDD ...
            activeRFTask clearWatermark ...
            hFillPS hLinePS hZeroPS hImg hTgt hEll hCross hLbl ...
            lastSharedYLim lastPanelTitle needFullDraw ...
-           gridFRsmCache lastSmoothN
+           gridFRsmCache lastSmoothN ...
+           lastSeenN block stayDefault
 
 if isempty(trials); return; end
 
@@ -92,13 +93,48 @@ else
     if any(isnan(psthWin)); psthWin = VIS_WIN_MS; end
 end
 
+% ── Returned to this task after another one? (Stay off -> new figure) ─────
+% Stay ON keeps plotting on the same figure. Stay OFF (default) freezes the
+% old figure (left open, controls disabled) and opens figure
+% nFig + 100*(block-1) holding only the trials from the return onward, with
+% the same channel / unit / windows / alignment. Only the trials since the
+% last call are scanned; an empty Task (dropped comment) never counts.
+if isempty(block);       block = 1;           end
+if isempty(stayDefault); stayDefault = false; end   % RF: Stay off by default
+if ~isempty(fig) && isvalid(fig); stayDefault = fig.UserData.stay; end
+carryUnit = [];
+nNow = numel(trials);
+if ~isempty(lastSeenN) && nNow > lastSeenN
+    g = lastForeignTrial(trials, lastSeenN + 1, nNow, @(t) ~isequal(t, activeRFTask));
+    if ~isempty(g) && ~stayDefault
+        if ~isempty(fig) && isvalid(fig)
+            freezeFigure(fig, sprintf('Jives RF — block %d (frozen)', block));
+            block     = block + 1;
+            carryUnit = unitSel;
+        end
+        fig = [];
+        % Re-seed both accumulators from the first returning trial via the
+        % existing Clear watermark path.
+        clearWatermark = g;
+        gridFR = [];
+        psthN  = [];
+    end
+end
+lastSeenN = nNow;
+
 % ── Build figure once ─────────────────────────────────────────────────────
 if isempty(fig) || ~isvalid(fig)
-    fig = figure(nFig);
+    fig = figure(nFig + 100*(block-1));
     clf(fig);
-    fig.UserData = struct('doFullClear', false, 'doFitRF', false, 'rfFit', []);
+    fig.UserData = struct('doFullClear', false, 'doFitRF', false, 'rfFit', [], ...
+                          'stay', stayDefault);
+    if block == 1
+        figName = 'Jives RF — Spatial PSTHs';
+    else
+        figName = sprintf('Jives RF — block %d', block);
+    end
     set(fig, 'Position',[100 50 1400 960], ...
-             'Name','Jives RF — Spatial PSTHs','NumberTitle','off');
+             'Name',figName,'NumberTitle','off');
     figH = fig.Position(4);
     fd   = 1 - CTRL_H/figH;
 
@@ -131,12 +167,12 @@ if isempty(fig) || ~isvalid(fig)
         'Position',[285 y 28 22],'String','RF:', ...
         'HorizontalAlignment','right','FontSize',10);
     hRFt0 = uicontrol(fig,'Style','edit','Units','pixels', ...
-        'Position',[317 ye 50 22],'String',num2str(RF_WIN_MS(1)), ...
+        'Position',[317 ye 50 22],'String',num2str(rfWin(1)), ...
         'FontSize',10,'Callback',CB);
     uicontrol(fig,'Style','text','Units','pixels', ...
         'Position',[370 y 18 22],'String','to','FontSize',10);
     hRFt1 = uicontrol(fig,'Style','edit','Units','pixels', ...
-        'Position',[391 ye 50 22],'String',num2str(RF_WIN_MS(2)), ...
+        'Position',[391 ye 50 22],'String',num2str(rfWin(2)), ...
         'FontSize',10,'Callback',CB);
     uicontrol(fig,'Style','text','Units','pixels', ...
         'Position',[444 y 22 22],'String','ms','FontSize',10);
@@ -162,7 +198,7 @@ if isempty(fig) || ~isvalid(fig)
         'HorizontalAlignment','right','FontSize',10);
     hAlignDD = uicontrol(fig,'Style','popupmenu','Units','pixels', ...
         'Position',[758 ye 160 22],'String',alignOpts, ...
-        'Value',1,'FontSize',10,'Callback',CB);
+        'Value',find(strcmp(alignOpts, alignStr), 1),'FontSize',10,'Callback',CB);
 
     % Clear / Fit buttons
     uicontrol(fig,'Style','pushbutton','Units','pixels', ...
@@ -175,6 +211,13 @@ if isempty(fig) || ~isvalid(fig)
         'FontSize',10,'BackgroundColor',[0.3 0.7 0.4], ...
         'ForegroundColor',[1 1 1], ...
         'Callback',@(~,~) fitRFAndRedraw(fig, nFig));
+    % Stay toggle — only stores its state; acted on at the next return
+    uicontrol(fig,'Style','togglebutton','Units','pixels', ...
+        'Position',[1106 ye 60 22],'String','Stay', ...
+        'FontSize',10,'Value',stayDefault, ...
+        'BackgroundColor',stayColor(stayDefault), ...
+        'ForegroundColor',[1 1 1], ...
+        'Callback',@onStayToggle);
 
     % Plot area — manual axes so every PSTH panel has identical dimensions
     pPlot = uipanel(fig,'Units','normalized','Position',[0,0,1,fd], ...
@@ -256,6 +299,15 @@ if ~isempty(spikeNCh) && spikeNCh >= 1
         hUnitDD.String = unitStrs;
         hUnitDD.Value  = min(hUnitDD.Value, numel(unitStrs));
         lastNUnits = nUnits;
+    end
+end
+% New block after a task switch: restore the previous figure's unit choice
+% (the channel is restored above via chSel)
+if ~isempty(carryUnit)
+    if carryUnit == -1
+        hUnitDD.Value = numel(hUnitDD.String);
+    elseif carryUnit < numel(hUnitDD.String)
+        hUnitDD.Value = carryUnit;
     end
 end
 
@@ -755,3 +807,37 @@ fig.UserData.doFullClear = true;
 plotJivesReceptiveField(nFig);
 end
 
+
+
+% ══════════════════════════════════════════════════════════════════════════
+function onStayToggle(h, ~)
+% Stay toggle callback: store the state on the figure and recolor the button.
+fig = ancestor(h, 'figure');
+fig.UserData.stay = logical(h.Value);
+h.BackgroundColor = stayColor(h.Value);
+end
+
+function c = stayColor(on)
+% Green when Stay is pressed, gray when released.
+if on; c = [0.3 0.7 0.4]; else; c = [0.6 0.6 0.6]; end
+end
+
+function freezeFigure(fig, name)
+% Leave a finished block's figure on screen but inert: its controls would
+% otherwise drive the persistent state that now belongs to the new figure.
+set(findall(fig, 'Type', 'uicontrol'), 'Enable', 'off');
+fig.Name = name;
+end
+
+function g = lastForeignTrial(trials, i0, i1, isForeign)
+% Index of the last trial in i0..i1 whose (non-empty) Task satisfies
+% isForeign, or [] if none. Scans backwards so it stops at the first hit.
+g = [];
+for n = i1:-1:i0
+    t = trials(n).Task;
+    if ~isempty(t) && isForeign(t)
+        g = n;
+        return;
+    end
+end
+end
