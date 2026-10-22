@@ -13,8 +13,20 @@ function plotJivesPsychometrics(nFig)
 %
 % Reads the numeric mirror `tsum` (built once per trial in getJivesData)
 % rather than rescanning the `trials` struct array on every tick.
+%
+% Periods: the session is cut into periods by the Superimpose button. Pressing
+% it freezes the current period's psychometric / RT points and fits on screen
+% (static, in that period's color) and starts a new period, in the next color,
+% from the next trial. Clear removes every period and restarts at color 1.
+%
+% Bias / Threshold: a sliding window of N_WIN valid trials of the current
+% period, stepped by one trial. While the period has k < N_WIN trials the
+% window grows (1..k); after that it is (k-N_WIN+1)..k. x = valid-trial count
+% since the last Clear, so successive periods sit side by side.
 
 global tsum
+
+N_WIN = 100;   % bias/threshold sliding-window length (valid trials)
 
 if isempty(tsum) || tsum.n < 2; return; end
 
@@ -22,22 +34,25 @@ if isempty(tsum) || tsum.n < 2; return; end
  %initialization
 persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 htxt ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R ...
-           rtlast_L rtlast_R rtx_L rtx_R pPrev optz;
+           rtlast_L rtlast_R rtx_L rtx_R pPrev optz ...
+           ax2 ax3 bhAll thAll frozenH pWin;
 if isempty(fig2) || ~isvalid(fig2)
     fig2 = figure(nFig);
-    fig2.UserData = struct('trialOffset', 0, 'doClear', false);
+    fig2.UserData = struct('trialOffset', 0, 'doClear', false, ...
+        'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0);
+    c1 = periodColor(1);
 
     ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
     hold(ax1, 'on');
     % scatter (not animatedline) so each dot's size can encode its trial count
-    dhandle  = scatter(ax1, nan, nan, 36, 'r', 'filled', 'DisplayName','Psychometric function');
+    dhandle  = scatter(ax1, nan, nan, 36, c1, 'filled', 'DisplayName','Psychometric function');
     plot([0,0],[0,1],'--k');
     plot([-250,250],[0.5,0.5],'--k');
 
-    nFit = animatedline('Color','r','LineStyle','-','LineWidth',2);
+    nFit = animatedline('Color',c1,'LineStyle','-','LineWidth',2);
 
     % Black-edged ring marking the most recently updated stimulus level
-    dlast = scatter(ax1, nan, nan, 36, 'r', 'filled', ...
+    dlast = scatter(ax1, nan, nan, 36, c1, 'filled', ...
         'MarkerEdgeColor', [0 0 0], 'LineWidth', 2, 'DisplayName','Latest level');
 
     xlabel('Onset time delay(s)');
@@ -53,27 +68,29 @@ if isempty(fig2) || ~isvalid(fig2)
         'Units', 'normalized', ...
         'HorizontalAlignment', 'right', ...
         'VerticalAlignment', 'bottom', ...
-        'FontSize', 11);
+        'FontSize', 11, 'Color', c1);
 
     ax2 = subplot(4,2,5,'Parent',fig2);
     box off
-    bhandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Bias');
     title('Bias', 'FontSize', 15)
     xlabel(ax2, 'Trial number');
     ax3 = subplot(4,2,6,'Parent',fig2);
     box off
-    thandle  = animatedline('Color','r','Marker','.','LineStyle','-','DisplayName','Threshold');
     title('Treshold', 'FontSize', 15);
     xlabel(ax3, 'Trial number');
+    % One bias/threshold line per period; bhAll/thAll keep every period's line
+    [bhandle, thandle] = newBiasLines(ax2, ax3, c1);
+    bhAll = bhandle;  thAll = thandle;
+    frozenH = gobjects(0);   % frozen-period objects + boundary lines (Clear deletes)
 
     % RT vs asynchrony — leftward onset first (stimulus_dir < 0)
     ax_rtL = subplot(4,2,7,'Parent',fig2);
     box off
     hold(ax_rtL, 'on');
     % scatter (not animatedline) so dot size can encode trials-per-level
-    rtdot_L = scatter(ax_rtL, nan, nan, 36, 'b', 'filled');               % leftward choice (congruent)
-    rtfit_L = animatedline(ax_rtL,'Color','b','LineStyle','-','LineWidth',1.5);
-    rtx_L   = scatter(ax_rtL, nan, nan, 36, 'b', 'x', 'LineWidth', 1.8);  % rightward choice (cross)
+    rtdot_L = scatter(ax_rtL, nan, nan, 36, c1, 'filled');               % leftward choice (congruent)
+    rtfit_L = animatedline(ax_rtL,'Color',c1,'LineStyle','-','LineWidth',1.5);
+    rtx_L   = scatter(ax_rtL, nan, nan, 36, c1, 'x', 'LineWidth', 1.8);  % rightward choice (cross)
     rtlast_L = scatter(ax_rtL, nan, nan, 36, 'MarkerEdgeColor',[0 0 0], ...
         'MarkerFaceColor','none', 'LineWidth', 2);     % hollow latest-trial ring
     xlabel(ax_rtL,'Onset asynchrony (ms)');
@@ -87,9 +104,9 @@ if isempty(fig2) || ~isvalid(fig2)
     box off
     hold(ax_rtR, 'on');
     % scatter (not animatedline) so dot size can encode trials-per-level
-    rtdot_R = scatter(ax_rtR, nan, nan, 36, 'r', 'filled');               % rightward choice (congruent)
-    rtfit_R = animatedline(ax_rtR,'Color','r','LineStyle','-','LineWidth',1.5);
-    rtx_R   = scatter(ax_rtR, nan, nan, 36, 'r', 'x', 'LineWidth', 1.8);  % leftward choice (cross)
+    rtdot_R = scatter(ax_rtR, nan, nan, 36, c1, 'filled');               % rightward choice (congruent)
+    rtfit_R = animatedline(ax_rtR,'Color',c1,'LineStyle','-','LineWidth',1.5);
+    rtx_R   = scatter(ax_rtR, nan, nan, 36, c1, 'x', 'LineWidth', 1.8);  % leftward choice (cross)
     rtlast_R = scatter(ax_rtR, nan, nan, 36, 'MarkerEdgeColor',[0 0 0], ...
         'MarkerFaceColor','none', 'LineWidth', 2);     % hollow latest-trial ring
     xlabel(ax_rtR,'Onset asynchrony (ms)');
@@ -98,24 +115,42 @@ if isempty(fig2) || ~isvalid(fig2)
     rtxt_R  = text(ax_rtR, 0.98, 0.95, '', 'Units','normalized', ...
         'HorizontalAlignment','right','VerticalAlignment','top','FontSize',10);
 
-    % Clear button — top-right corner
+    % Superimpose + Clear buttons — top-right corner. Each sets a flag and
+    % re-invokes this function so the action shows immediately rather than
+    % waiting for the next trial.
+    uicontrol(fig2, 'Style', 'pushbutton', 'Units', 'normalized', ...
+        'Position', [0.72, 0.965, 0.13, 0.030], ...
+        'String', 'Superimpose', 'FontSize', 10, ...
+        'BackgroundColor', [0.35 0.55 0.8], 'ForegroundColor', [1 1 1], ...
+        'Callback', @(~,~) requestPsychAction(fig2, 'doSuperimpose', nFig));
     uicontrol(fig2, 'Style', 'pushbutton', 'Units', 'normalized', ...
         'Position', [0.86, 0.965, 0.12, 0.030], ...
         'String', 'Clear', 'FontSize', 10, ...
         'BackgroundColor', [0.85 0.4 0.4], 'ForegroundColor', [1 1 1], ...
-        'Callback', @(~,~) clearPsychData(fig2));
+        'Callback', @(~,~) requestPsychAction(fig2, 'doClear', nFig));
 
     time_count = 0;
 end
 
-% --- Handle clear request (set by button callback on previous tick) ---
+% --- Handle clear request: drop every period, restart at color 1 ---
 if fig2.UserData.doClear
-    fig2.UserData.trialOffset = tsum.n;
-    fig2.UserData.doClear     = false;
+    fig2.UserData.trialOffset   = tsum.n;
+    fig2.UserData.doClear       = false;
+    fig2.UserData.doSuperimpose = false;
+    fig2.UserData.period        = 1;
+    fig2.UserData.xBase         = 0;
+    fig2.UserData.nDone         = 0;
     time_count = 0;
-    pPrev      = [];      % drop the warm-start seed with the data it came from
+    pPrev      = [];      % drop the warm-start seeds with the data they came from
+    pWin       = [];
+    delete(frozenH(isgraphics(frozenH)));  frozenH = gobjects(0);
+    oldLines = [bhAll(:); thAll(:)];
+    delete(oldLines(isgraphics(oldLines)));
+    [bhandle, thandle] = newBiasLines(ax2, ax3, periodColor(1));
+    bhAll = bhandle;  thAll = thandle;
+    recolorLive(periodColor(1), [dhandle dlast rtdot_L rtx_L rtdot_R rtx_R], ...
+        [nFit rtfit_L rtfit_R], htxt);
     blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
-    clearpoints(bhandle); clearpoints(thandle);
     blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
     blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
     htxt.String = '';
@@ -123,7 +158,43 @@ if fig2.UserData.doClear
     return;
 end
 
-% --- Apply trial offset (set by Clear button) ---
+% --- Handle superimpose request: freeze this period, start the next one ---
+if fig2.UserData.doSuperimpose
+    fig2.UserData.doSuperimpose = false;
+    nPeriod = fig2.UserData.nDone;          % valid trials shown for this period
+    if nPeriod >= 1                         % empty period -> nothing to freeze
+        cOld = periodColor(fig2.UserData.period);
+        frozenH = [frozenH; freezePeriod(cOld, ...
+            [dhandle rtdot_L rtx_L rtdot_R rtx_R], [nFit rtfit_L rtfit_R])];
+
+        xb = fig2.UserData.xBase + nPeriod;
+        frozenH = [frozenH; ...
+            xline(ax2, xb + 0.5, '--', 'Color', [0.6 0.6 0.6], 'HandleVisibility', 'off'); ...
+            xline(ax3, xb + 0.5, '--', 'Color', [0.6 0.6 0.6], 'HandleVisibility', 'off')];
+
+        fig2.UserData.xBase       = xb;
+        fig2.UserData.period      = fig2.UserData.period + 1;
+        fig2.UserData.trialOffset = tsum.n;
+        fig2.UserData.nDone       = 0;
+        time_count = 0;
+        pPrev      = [];
+        pWin       = [];
+
+        cNew = periodColor(fig2.UserData.period);
+        [bhandle, thandle] = newBiasLines(ax2, ax3, cNew);
+        bhAll(end+1) = bhandle;  thAll(end+1) = thandle;
+        recolorLive(cNew, [dhandle dlast rtdot_L rtx_L rtdot_R rtx_R], ...
+            [nFit rtfit_L rtfit_R], htxt);
+        blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
+        blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
+        blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
+        htxt.String = '';
+        drawnow limitrate;
+    end
+    return;
+end
+
+% --- Apply trial offset (set by Clear / Superimpose) ---
 % Indexes the numeric mirror `tsum`, which getJivesData appends in lockstep
 % with `trials`, so the Clear-button offset semantics are unchanged.
 offset = fig2.UserData.trialOffset;
@@ -184,24 +255,16 @@ TotalTrials = numel(vIdx);
 % zero asynchrony) — a sigmoid is unconstrained otherwise.
 canFitPsy = any(stimulus_dir < 0) && any(stimulus_dir > 0);
 
+if isempty(optz)
+    optz = optimset('Display','off');      % built once, not every tick
+end
+
 if canFitPsy
-    % Constrained logistic MLE: parameterise the slope as b1 = exp(g), so the
-    % slope is POSITIVE by construction and the psychometric can never fit
-    % "reversed" (negative slope / negative threshold). Unconstrained ML over
-    % [b0, g] via fminsearch (base MATLAB) on the Bernoulli neg-log-likelihood.
-    x = stimulus_dir(:);
-    y = double(choiceLR(:) == 1);            % 1 = rightward choice
-
-    % Numerically stable softplus: log(1+exp(z)) without overflow.
-    softplus = @(z) max(z,0) + log1p(exp(-abs(z)));
-    nll = @(p) sum( softplus(p(1) + exp(p(2)).*x) - y.*(p(1) + exp(p(2)).*x) );
-
+    % Constrained logistic MLE (see fitLogisticMLE): slope = exp(g) > 0, so the
+    % psychometric can never fit "reversed".
     % Adaptive iteration cap: few trials -> few iterations (fast, rough),
     % growing as data accumulates for a more accurate fit later.
     maxIter = min(400, 60 + 4*TotalTrials);
-    if isempty(optz)
-        optz = optimset('Display','off');      % built once, not every tick
-    end
     optz.MaxIter    = maxIter;
     optz.MaxFunEvals = 2*maxIter;
 
@@ -213,11 +276,7 @@ if canFitPsy
     else
         p0 = pPrev;
     end
-    pHat = fminsearch(nll, p0, optz);
-
-    b0 = pHat(1);
-    b1 = exp(pHat(2));                        % > 0 by construction
-    validFit = isfinite(b0) && isfinite(b1) && b1 > 0;
+    [b0, b1, pHat, validFit] = fitLogisticMLE(stimulus_dir(:), double(choiceLR(:) == 1), p0, optz);
     if validFit
         pPrev = pHat;                         % seed for the next tick
     else
@@ -230,14 +289,7 @@ end
 
 if validFit
     % Get bias and threshold
-    pse = -b0 / b1;
-    threshold = 1/b1;
-    if abs(pse) > 500
-        pse = NaN;
-    end
-    if abs(threshold) > 1000
-        threshold = NaN;
-    end
+    [pse, threshold] = pseThreshold(b0, b1);
 
     %Fitted curve
     xx = linspace(-250, 250, 100);
@@ -284,13 +336,29 @@ else
 end
 
 
-% x-axis = actual valid-trial count (TotalTrials), not the plot-update
-% counter time_count — the two diverge when >1 trial completes in one T2
-% tick, which made the Bias/Threshold x lag behind the displayed N.
-% Only append valid (positive-slope) fits so the series has no NaN gaps.
-if validFit
-    addpoints(bhandle, TotalTrials , pse);
-    addpoints(thandle, TotalTrials , threshold);
+% --- Bias / Threshold: sliding window of N_WIN valid trials, step 1 ---
+% One point per new valid trial k of this period (window max(1,k-N_WIN+1):k),
+% so several trials arriving in one tick still each get their own point.
+% x = valid-trial count since the last Clear (xBase + k).
+nDone = fig2.UserData.nDone;
+if TotalTrials > nDone
+    % While k <= N_WIN the window IS the whole period, so the newest point is
+    % exactly the cumulative fit above — reuse it instead of refitting.
+    reuseMain = validFit && TotalTrials <= N_WIN;
+    kTo = TotalTrials - reuseMain;
+    [ks, pses, thrs, pWin] = computeSlidingBiasThresh(stimulus_dir, choiceLR, ...
+        nDone + 1, kTo, N_WIN, pWin, optz);
+    if reuseMain
+        pWin = pPrev;
+        if isfinite(pse) && isfinite(threshold)
+            ks(end+1) = TotalTrials;  pses(end+1) = pse;  thrs(end+1) = threshold;
+        end
+    end
+    if ~isempty(ks)
+        addpoints(bhandle, fig2.UserData.xBase + ks, pses);
+        addpoints(thandle, fig2.UserData.xBase + ks, thrs);
+    end
+    fig2.UserData.nDone = TotalTrials;
 end
 
 % --- RT vs asynchrony panels ---
@@ -370,10 +438,120 @@ end
 %}
 end
 
-function clearPsychData(fig)
+function requestPsychAction(fig, flag, nFig)
+% Button callback: raise the deferred flag, then run the plot function once so
+% the Clear / Superimpose takes effect now instead of on the next trial.
     if ~isempty(fig) && isvalid(fig)
-        fig.UserData.doClear = true;
+        fig.UserData.(flag) = true;
+        plotJivesPsychometrics(nFig);
     end
+end
+
+function c = periodColor(k)
+% Color of period k. Period 1 is the original red; cycles after 6 periods.
+PALETTE = [0.85 0.10 0.10;    % red
+           0.00 0.45 0.74;    % blue
+           0.20 0.63 0.17;    % green
+           0.93 0.57 0.13;    % orange
+           0.49 0.18 0.56;    % purple
+           0.30 0.75 0.93];   % cyan
+c = PALETTE(mod(k-1, size(PALETTE,1)) + 1, :);
+end
+
+function [bh, th] = newBiasLines(ax2, ax3, c)
+% Fresh bias / threshold animatedlines for one period.
+bh = animatedline(ax2, 'Color', c, 'Marker', '.', 'LineStyle', '-', 'DisplayName', 'Bias');
+th = animatedline(ax3, 'Color', c, 'Marker', '.', 'LineStyle', '-', 'DisplayName', 'Threshold');
+end
+
+function recolorLive(c, scatters, alines, txt)
+% Point the live (current-period) objects at period color c. CData drives the
+% fill of 'filled' scatters and the edge of 'x' scatters; black edges/rings
+% set explicitly are untouched.
+set(scatters, 'CData', c);
+set(alines, 'Color', c);
+txt.Color = c;
+end
+
+function h = freezePeriod(c, scatters, alines)
+% Static copies of the current period's dots and fit lines, drawn in color c
+% and pushed under the live objects. Returns the new handles (column).
+h = gobjects(0, 1);
+for s = scatters
+    if ~isempty(s.XData) && any(~isnan(s.XData))
+        h(end+1, 1) = copyobj(s, s.Parent); %#ok<AGROW>
+        set(h(end), 'CData', c, 'HandleVisibility', 'off');
+    end
+end
+for a = alines
+    [x, y] = getpoints(a);
+    if ~isempty(x)
+        h(end+1, 1) = line(a.Parent, x, y, 'Color', c, 'LineWidth', a.LineWidth, ...
+            'HandleVisibility', 'off'); %#ok<AGROW>
+    end
+end
+for j = 1:numel(h)          % uistack needs one parent per call
+    uistack(h(j), 'bottom');
+end
+end
+
+function [b0, b1, pHat, ok] = fitLogisticMLE(x, y, p0, optz)
+% Constrained logistic MLE: parameterise the slope as b1 = exp(g), so the
+% slope is POSITIVE by construction and the psychometric can never fit
+% "reversed" (negative slope / negative threshold). Unconstrained ML over
+% [b0, g] via fminsearch (base MATLAB) on the Bernoulli neg-log-likelihood.
+% x: signed asynchrony (column), y: 1 = rightward choice (column).
+softplus = @(z) max(z,0) + log1p(exp(-abs(z)));   % stable log(1+exp(z))
+nll = @(p) sum( softplus(p(1) + exp(p(2)).*x) - y.*(p(1) + exp(p(2)).*x) );
+pHat = fminsearch(nll, p0, optz);
+b0 = pHat(1);
+b1 = exp(pHat(2));                                  % > 0 by construction
+ok = isfinite(b0) && isfinite(b1) && b1 > 0;
+end
+
+function [pse, threshold] = pseThreshold(b0, b1)
+% PSE (bias) and threshold of the logistic fit, NaN when implausibly large.
+pse = -b0 / b1;
+threshold = 1/b1;
+if abs(pse) > 500
+    pse = NaN;
+end
+if abs(threshold) > 1000
+    threshold = NaN;
+end
+end
+
+function [ks, pses, thrs, pWin] = computeSlidingBiasThresh(stimDir, choiceLR, kFrom, kTo, N, pWin, optz)
+% Bias / threshold for each window ending at k = kFrom..kTo, where window k is
+% trials max(1,k-N+1):k (grows until N trials, then slides by one). Windows
+% without stimuli on both sides of zero, or with an invalid / out-of-range
+% fit, are skipped. pWin is the warm-start seed, returned updated.
+stimDir = stimDir(:);
+y = double(choiceLR(:) == 1);
+ks = [];  pses = [];  thrs = [];
+for k = kFrom:kTo
+    w = max(1, k-N+1):k;
+    sx = stimDir(w);
+    if ~(any(sx < 0) && any(sx > 0)); continue; end
+    maxIter = min(400, 60 + 4*numel(w));
+    optz.MaxIter     = maxIter;
+    optz.MaxFunEvals = 2*maxIter;
+    if isempty(pWin) || any(~isfinite(pWin))
+        p0 = [0, log(0.02)];
+    else
+        p0 = pWin;
+    end
+    [b0, b1, pHat, ok] = fitLogisticMLE(sx, y(w), p0, optz);
+    if ~ok
+        pWin = [];
+        continue;
+    end
+    pWin = pHat;
+    [pse, thr] = pseThreshold(b0, b1);
+    if isfinite(pse) && isfinite(thr)
+        ks(end+1) = k;  pses(end+1) = pse;  thrs(end+1) = thr; %#ok<AGROW>
+    end
+end
 end
 
 function sz = relDotSize(n, maxN)
