@@ -37,7 +37,7 @@ if isempty(tsum) || tsum.n < 2; return; end
 
 %try
  %initialization
-persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 htxt ...
+persistent fig2 dhandle dlast bhandle thandle nFit time_count ax1 legH ...
            ax_rtL ax_rtR rtdot_L rtdot_R rtfit_L rtfit_R rtxt_L rtxt_R ...
            rtlast_L rtlast_R rtx_L rtx_R pPrev optz ...
            ax2 ax3 bhAll thAll frozenH pWin ...
@@ -93,12 +93,11 @@ if isempty(fig2) || ~isvalid(fig2)
     ylabel('Proprotion');
     title('Psychometric function', 'FontSize', 15);
 
-    % Persistent text annotation — updated in-place each tick
-    htxt = text(ax1, 0.98, 0.05, '', ...
-        'Units', 'normalized', ...
-        'HorizontalAlignment', 'right', ...
-        'VerticalAlignment', 'bottom', ...
-        'FontSize', 11, 'Color', c1);
+    % Segment legend (top-left, where P(right) ~ 0 leaves the axes empty):
+    % one row per superimposed segment, each backed by an invisible proxy
+    % line so a segment gets a row even if it never produced a valid fit.
+    legH = segmentProxy(ax1, c1, segmentLabel(1, 0, 0, NaN, NaN, true));
+    buildSegLegend(ax1, legH);
 
     ax2 = subplot(4,2,5,'Parent',fig2);
     box off
@@ -193,12 +192,14 @@ if fig2.UserData.doClear
     delete(oldLines(isgraphics(oldLines)));
     [bhandle, thandle] = newBiasLines(ax2, ax3, periodColor(1));
     bhAll = bhandle;  thAll = thandle;
+    delete(legH(isgraphics(legH)));
+    legH = segmentProxy(ax1, periodColor(1), segmentLabel(1, 0, 0, NaN, NaN, true));
+    buildSegLegend(ax1, legH);
     recolorLive(periodColor(1), [dhandle dlast rtdot_L rtx_L rtdot_R rtx_R], ...
-        [nFit rtfit_L rtfit_R], htxt);
+        [nFit rtfit_L rtfit_R]);
     blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
     blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
     blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
-    htxt.String = '';
     drawnow;
     return;
 end
@@ -228,12 +229,17 @@ if fig2.UserData.doSuperimpose
         cNew = periodColor(fig2.UserData.period);
         [bhandle, thandle] = newBiasLines(ax2, ax3, cNew);
         bhAll(end+1) = bhandle;  thAll(end+1) = thandle;
+        % Freeze the finished segment's legend row (drop the live marker) and
+        % add a row for the new one.
+        legH(end).DisplayName = strrep(legH(end).DisplayName, '*', ' ');
+        legH(end+1) = segmentProxy(ax1, cNew, ...
+            segmentLabel(fig2.UserData.period, 0, 0, NaN, NaN, true));
+        buildSegLegend(ax1, legH);
         recolorLive(cNew, [dhandle dlast rtdot_L rtx_L rtdot_R rtx_R], ...
-            [nFit rtfit_L rtfit_R], htxt);
+            [nFit rtfit_L rtfit_R]);
         blankScatter(dhandle); blankScatter(dlast); clearpoints(nFit);
         blankScatter(rtdot_L); blankScatter(rtx_L); blankScatter(rtlast_L); clearpoints(rtfit_L); rtxt_L.String = '';
         blankScatter(rtdot_R); blankScatter(rtx_R); blankScatter(rtlast_R); clearpoints(rtfit_R); rtxt_R.String = '';
-        htxt.String = '';
         drawnow limitrate;
     end
     return;
@@ -373,12 +379,11 @@ if ~isempty(xx)
     addpoints( nFit, xx ,yy);
 end
 
-% Update annotation in-place — no accumulation, no axis-targeting issues
-if validFit
-    htxt.String = sprintf('PSE = %.1f ms\nThresh = %.1f ms\nN = %d', pse, threshold, TotalTrials);
-else
-    htxt.String = sprintf('collecting data...\nN = %d', TotalTrials);
-end
+% Live segment's legend row: choice trials / correct (outcome bit 1, set by
+% outcomeMask in getJivesData), PSE and threshold of the cumulative fit
+nCorrect = sum(bitand(tsum.outcome(vIdx), uint8(1)) > 0);
+legH(end).DisplayName = segmentLabel(fig2.UserData.period, TotalTrials, ...
+    nCorrect, pse, threshold, true);
 
 
 % --- Bias / Threshold: sliding window of N_WIN valid trials, step 1 ---
@@ -541,13 +546,42 @@ bh = animatedline(ax2, 'Color', c, 'Marker', '.', 'LineStyle', '-', 'DisplayName
 th = animatedline(ax3, 'Color', c, 'Marker', '.', 'LineStyle', '-', 'DisplayName', 'Threshold');
 end
 
-function recolorLive(c, scatters, alines, txt)
+function recolorLive(c, scatters, alines)
 % Point the live (current-period) objects at period color c. CData drives the
 % fill of 'filled' scatters and the edge of 'x' scatters; black edges/rings
 % set explicitly are untouched.
 set(scatters, 'CData', c);
 set(alines, 'Color', c);
-txt.Color = c;
+end
+
+function h = segmentProxy(ax, c, label)
+% Invisible (NaN) line that only exists to give a segment its legend row.
+h = line(ax, NaN, NaN, 'Color', c, 'LineWidth', 2.5, 'DisplayName', label);
+end
+
+function lg = buildSegLegend(ax, legH)
+% (Re)build the segment legend from the proxies. Fixed-width font keeps the
+% columns aligned with the title row; no box so it never hides data behind it;
+% AutoUpdate off so later plotted objects (frozen copies etc.) are not added.
+% Newest (live) segment first, so it always sits right under the header.
+lg = legend(ax, flip(legH), 'Location', 'northwest', 'Box', 'off', ...
+    'FontName', 'FixedWidth', 'FontSize', 9, 'Interpreter', 'none', ...
+    'AutoUpdate', 'off');
+lg.Title.String     = sprintf('%-3s %9s %8s %8s', 'Seg', 'N/Corr', 'PSE(ms)', 'Thr(ms)');
+lg.Title.FontName   = 'FixedWidth';
+lg.Title.FontWeight = 'normal';
+end
+
+function s = segmentLabel(k, nChoice, nCorrect, pse, thr, isLive)
+% One legend row: segment k (live one marked '*'), choice trials / correct,
+% PSE and threshold of the segment's cumulative fit ('--' when no valid fit).
+if isLive; mark = '*'; else; mark = ' '; end
+s = sprintf('S%d%s %9s %8s %8s', k, mark, sprintf('%d/%d', nChoice, nCorrect), ...
+    fmtFit(pse), fmtFit(thr));
+end
+
+function s = fmtFit(v)
+if isfinite(v); s = sprintf('%.1f', v); else; s = '--'; end
 end
 
 function h = freezePeriod(c, scatters, alines)
