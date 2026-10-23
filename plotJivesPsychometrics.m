@@ -46,6 +46,16 @@ if isempty(block);       block = 1;          end
 if isempty(stayDefault); stayDefault = true; end   % psychometric: Stay on by default
 if ~isempty(fig2) && isvalid(fig2); stayDefault = fig2.UserData.stay; end
 
+% A T2 tick can preempt a running Superimpose/Clear button callback (MATLAB
+% timers interrupt M-code anywhere, not just at drawnow). Plotting against the
+% half-updated period state counted the new trial in the old segment's legend
+% row but not in xBase, so Total N fell 1 below the row sum. Skip such a tick;
+% the trial is picked up by the next one (Superimpose cuts at lastN, below).
+if ~isempty(fig2) && isvalid(fig2) && fig2.UserData.inAction && ...
+        ~fig2.UserData.doSuperimpose && ~fig2.UserData.doClear
+    return
+end
+
 % --- Returned to this task after another one? (Stay off -> new figure) ---
 % Only the trials since the last call are scanned; a trial with an empty
 % Task (dropped comment) never counts as a switch.
@@ -69,7 +79,8 @@ if isempty(fig2) || ~isvalid(fig2)
     fig2.Name = sprintf('Psychometric — block %d', block);
     fig2.UserData = struct('trialOffset', 0, 'doClear', false, ...
         'doSuperimpose', false, 'period', 1, 'xBase', 0, 'nDone', 0, ...
-        'corrBase', 0, 'nCorrLive', 0, 'stay', stayDefault);
+        'corrBase', 0, 'nCorrLive', 0, 'lastN', 0, 'inAction', false, ...
+        'stay', stayDefault);
     c1 = periodColor(1);
 
     ax1 = subplot(4,2,[1,2,3,4],'Parent',fig2);
@@ -231,7 +242,10 @@ if fig2.UserData.doSuperimpose
         fig2.UserData.corrBase    = fig2.UserData.corrBase + fig2.UserData.nCorrLive;
         fig2.UserData.nCorrLive   = 0;
         fig2.UserData.period      = fig2.UserData.period + 1;
-        fig2.UserData.trialOffset = tsum.n;
+        % Cut at the last trial this period actually plotted, not tsum.n:
+        % trials that arrived since the last tick go to the new period
+        % instead of being dropped from both.
+        fig2.UserData.trialOffset = fig2.UserData.lastN;
         fig2.UserData.nDone       = 0;
         time_count = 0;
         pPrev      = [];
@@ -259,16 +273,16 @@ end
 % --- Apply trial offset (set by Clear / Superimpose) ---
 % Indexes the numeric mirror `tsum`, which getJivesData appends in lockstep
 % with `trials`, so the Clear-button offset semantics are unchanged.
+% offset == tsum.n just means no trial yet since Clear/Superimpose. Treating
+% it as an external refresh reset the offset to 0, so the new period swallowed
+% the whole session.
 offset = fig2.UserData.trialOffset;
-if offset > 0 && offset + 1 <= tsum.n
-    i0 = offset + 1;
-else
-    if offset >= tsum.n
-        disp('plotJivesPsychometrics: trials refreshed externally — using full trials array');
-        fig2.UserData.trialOffset = 0;
-    end
-    i0 = 1;
+if offset > tsum.n
+    disp('plotJivesPsychometrics: trials refreshed externally — using full trials array');
+    fig2.UserData.trialOffset = 0;
+    offset = 0;
 end
+i0 = offset + 1;
 if tsum.n - i0 + 1 < 2; return; end
 
 % --- Trials with a valid choice AND from the time-discrimination task ---
@@ -397,6 +411,7 @@ legH(end).DisplayName = segmentLabel(fig2.UserData.period, TotalTrials, ...
     nCorrect, pse, threshold, true);
 % Totals across segments: frozen segments (xBase / corrBase) + live one
 fig2.UserData.nCorrLive = nCorrect;
+fig2.UserData.lastN     = sel(end);   % not tsum.n: T1 may have appended since
 htot.String = sprintf('Total N/Corr  %d/%d', ...
     fig2.UserData.xBase + TotalTrials, fig2.UserData.corrBase + nCorrect);
 
@@ -508,8 +523,14 @@ function requestPsychAction(fig, flag, nFig)
 % the Clear / Superimpose takes effect now instead of on the next trial.
     if ~isempty(fig) && isvalid(fig)
         fig.UserData.(flag) = true;
+        fig.UserData.inAction = true;          % T2 ticks skip until we finish
+        done = onCleanup(@() endPsychAction(fig)); %#ok<NASGU>
         plotJivesPsychometrics(nFig);
     end
+end
+
+function endPsychAction(fig)
+    if isvalid(fig); fig.UserData.inAction = false; end
 end
 
 function onStayToggle(h, ~)
